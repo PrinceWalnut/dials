@@ -155,3 +155,8 @@ for cmd in [
 
 
 _install_dials_autocompletion()
+
+if libtbx.env.build_options.skip_phenix_dispatchers:
+    import dials.util.pkg_utils
+
+    dials.util.pkg_utils.require_conda_packages(["numpy>=1.16,<1.17"])
