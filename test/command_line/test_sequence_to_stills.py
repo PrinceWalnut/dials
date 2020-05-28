@@ -31,4 +31,4 @@ def test_sequence_to_stills(dials_regression, tmpdir):
     experiments = ExperimentListFactory.from_json_file(
         tmpdir.join("stills.expt").strpath, check_format=False
     )
-    assert len(experiments) == 10
+    assert len(experiments) == 10, len(experiments)
