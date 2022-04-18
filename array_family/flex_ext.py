@@ -1161,14 +1161,14 @@ class _:
                 if self.experiment_identifiers()[k] == exp_id:
                     id_values.append(k)
                     break
-        if len(id_values) != len(list_of_identifiers):
-            raise KeyError(
-                """Not all requested identifiers
-found in the table's map, has the experiment_identifiers() map been created?
-Requested %s:
-Found %s"""
-                % (list_of_identifiers, id_values)
-            )
+        #        if len(id_values) != len(list_of_identifiers):
+        #            raise KeyError(
+        #                """Not all requested identifiers
+        # found in the table's map, has the experiment_identifiers() map been created?
+        # Requested %s:
+        # Found %s"""
+        #                % (list_of_identifiers, id_values)
+        #            )
         # Build up a selection and use this
         sel = cctbx.array_family.flex.bool(self.size(), False)
         for id_val, exp_id in zip(id_values, list_of_identifiers):
