@@ -308,7 +308,7 @@ class IntegrationReport(Report):
 
         # Split the tables by experiment id
         tables = reflections.split_by_experiment_id()
-        assert len(tables) == len(experiments)
+        # assert len(tables) == len(experiments)
 
         # Initialise the dictionary
         report_list = []
