@@ -540,7 +540,7 @@ def _finalize_stills(reflections, experiments, params):
 
     # Select only those reflections which were integrated
     if "intensity.prf.variance" in integrated:
-        selection = integrated.get_flags(integrated.flags.integrated, all=True)
+        selection = integrated.get_flags(integrated.flags.integrated, all=False)
     else:
         selection = integrated.get_flags(integrated.flags.integrated_sum)
     integrated = integrated.select(selection)
@@ -557,7 +557,7 @@ def _finalize_stills(reflections, experiments, params):
 
     # verify sigmas are sensible
     if "intensity.prf.value" in integrated:
-        if (integrated["intensity.prf.variance"] <= 0).count(True) > 0:
+        if (integrated["intensity.prf.variance"] < 0).count(True) > 0:
             raise Sorry(
                 "Found negative variances (prf). Are bad pixels properly masked out?"
             )
