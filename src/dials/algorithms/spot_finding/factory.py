@@ -534,6 +534,31 @@ class SpotFinderFactory:
                 initial_wavelength=params.spotfinder.laue.initial_wavelength,
             )
 
+        if experiments.all_laue():
+            filter_spots = SpotFinderFactory.configure_filter(params)
+
+            return LaueSpotFinder(
+                experiments=experiments,
+                threshold_function=threshold_function,
+                mask=params.spotfinder.lookup.mask,
+                filter_spots=filter_spots,
+                scan_range=params.spotfinder.scan_range,
+                write_hot_mask=params.spotfinder.write_hot_mask,
+                hot_mask_prefix=params.spotfinder.hot_mask_prefix,
+                mp_method=params.spotfinder.mp.method,
+                mp_nproc=params.spotfinder.mp.nproc,
+                mp_njobs=params.spotfinder.mp.njobs,
+                mp_chunksize=params.spotfinder.mp.chunksize,
+                max_strong_pixel_fraction=params.spotfinder.filter.max_strong_pixel_fraction,
+                compute_mean_background=params.spotfinder.compute_mean_background,
+                region_of_interest=params.spotfinder.region_of_interest,
+                mask_generator=mask_generator,
+                min_spot_size=params.spotfinder.filter.min_spot_size,
+                max_spot_size=params.spotfinder.filter.max_spot_size,
+                min_chunksize=params.spotfinder.mp.min_chunksize,
+                initial_wavelength=params.spotfinder.laue.initial_wavelength,
+            )
+
         filter_spots = SpotFinderFactory.configure_filter(params)
 
         return SpotFinder(
