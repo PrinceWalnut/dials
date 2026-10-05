@@ -20,6 +20,7 @@ from dxtbx.model.experiment_list import (
 from dxtbx.sequence_filenames import template_regex_from_list
 
 from dials.util import Sorry, log, show_mail_handle_errors
+from dials.util.laue import is_laue_beam
 from dials.util.multi_dataset_handling import generate_experiment_identifiers
 from dials.util.options import ArgumentParser, flatten_experiments
 from dials.util.version import dials_version
@@ -45,6 +46,10 @@ of files may exceed this. In this case image filenames can be input on stdin
 as shown in the examples below. Alternatively a template can be specified using
 the template= parameter where the consecutive digits representing the image
 numbers in the filenames are replaced with '#' characters.
+
+Laue (pink-beam) data in NeXus (NXmx) files, for which a polychromatic beam is
+read from the file, are imported as stills, as if convert_sequences_to_stills=True
+had been given. Set laue.import_as_stills=False to import such data as sequences.
 
 The geometry can be set manually, either by using the reference_geometry=
 parameter to specify an experiment list .expt file containing
@@ -155,6 +160,14 @@ phil_scope = libtbx.phil.parse(
 
   }
 
+  laue {
+    import_as_stills = True
+      .type = bool
+      .help = "Import NeXus (NXmx) data with a polychromatic (pink) beam as "
+              "Laue stills, as for convert_sequences_to_stills=True. Set to "
+              "False to import such data as sequences instead."
+  }
+
   include scope dials.util.options.format_phil_scope
 
   include scope dials.util.options.geometry_phil_scope
@@ -253,6 +266,38 @@ def _extract_or_read_imagesets(params):
     return imageset_list
 
 
+def _convert_sequence_to_stills(imageset):
+    """
+    Convert an imageset into a stills imageset with no scan or goniometer.
+    """
+    from dxtbx.imageset import ImageSetFactory
+
+    imageset = ImageSetFactory.imageset_from_anyset(imageset)
+    for j in range(len(imageset)):
+        imageset.set_scan(None, j)
+        imageset.set_goniometer(None, j)
+    return imageset
+
+
+def _is_nexus_laue_sequence(imageset) -> bool:
+    """
+    True if the imageset is a sequence read from a NeXus (NXmx) file with a
+    polychromatic beam, as for pink-beam Laue data. Time-of-flight data, which
+    also have a polychromatic beam, are excluded.
+    """
+    from dxtbx.format.FormatNXmx import FormatNXmx
+
+    if not isinstance(imageset, ImageSequence):
+        return False
+    if not is_laue_beam(imageset.get_beam()):
+        return False
+    scan = imageset.get_scan()
+    if scan is not None and scan.has_property("time_of_flight"):
+        return False
+    format_class = imageset.get_format_class()
+    return format_class is not None and issubclass(format_class, FormatNXmx)
+
+
 class ReferenceGeometryUpdater:
     """
     A class to replace beam + detector with a reference
@@ -344,7 +389,7 @@ class ManualGeometryUpdater:
         """
         from copy import deepcopy
 
-        from dxtbx.imageset import ImageSequence, ImageSetFactory
+        from dxtbx.imageset import ImageSequence
         from dxtbx.model import (
             BeamFactory,
             DetectorFactory,
@@ -353,10 +398,7 @@ class ManualGeometryUpdater:
         )
 
         if self.params.geometry.convert_sequences_to_stills:
-            imageset = ImageSetFactory.imageset_from_anyset(imageset)
-            for j in range(len(imageset)):
-                imageset.set_scan(None, j)
-                imageset.set_goniometer(None, j)
+            imageset = _convert_sequence_to_stills(imageset)
 
         beam = imageset.get_beam()
         detector = imageset.get_detector()
@@ -503,6 +545,16 @@ class MetaDataUpdater:
             # Update the geometry
             for updater in self.update_geometry:
                 imageset = updater(imageset)
+
+            # Import pink-beam Laue data from NeXus files as stills
+            if self.params.laue.import_as_stills and _is_nexus_laue_sequence(imageset):
+                logger.info(
+                    "Polychromatic beam found in NeXus data: importing %s as "
+                    "Laue stills (set laue.import_as_stills=False to import "
+                    "as a sequence)",
+                    imageset.get_template(),
+                )
+                imageset = _convert_sequence_to_stills(imageset)
 
             # Check beam and detector are present
             if imageset.get_beam() is None or imageset.get_detector() is None:

@@ -543,6 +543,9 @@ class ExtractSpots:
         # Change the number of processors if necessary
         mp_nproc = self.mp_nproc
         mp_njobs = self.mp_njobs
+        if mp_nproc is libtbx.Auto:
+            mp_nproc = CPU_COUNT
+            logger.info(f"Setting nproc={mp_nproc}")
         if mp_nproc * mp_njobs > len(imageset):
             mp_nproc = min(mp_nproc, len(imageset))
             mp_njobs = int(math.ceil(len(imageset) / mp_nproc))
@@ -721,6 +724,13 @@ class SpotFinder:
             )
 
             reflections.extend(table)
+
+            # Each imageset caches its most recently read image. With many
+            # imagesets (e.g. one per still) these caches add up to a large
+            # amount of memory, so drop them once we are done with an imageset.
+            if len(imagesets) > 1:
+                imageset.clear_cache()
+
             # Write a hot pixel mask
             if self.write_hot_mask:
                 if not imageset.external_lookup.mask.data.empty():
@@ -1106,6 +1116,7 @@ class LaueSpotFinder(SpotFinder):
         max_spot_size=20,
         min_chunksize=50,
         initial_wavelength=None,
+        no_shoeboxes_2d=False,
     ):
         super().__init__(
             threshold_function=threshold_function,
@@ -1124,7 +1135,7 @@ class LaueSpotFinder(SpotFinder):
             hot_mask_prefix=hot_mask_prefix,
             min_spot_size=min_spot_size,
             max_spot_size=max_spot_size,
-            no_shoeboxes_2d=False,
+            no_shoeboxes_2d=no_shoeboxes_2d,
             min_chunksize=min_chunksize,
             is_stills=False,
         )
@@ -1137,8 +1148,9 @@ class LaueSpotFinder(SpotFinder):
         if self.initial_wavelength is not None:
             initial_wavelength = self.initial_wavelength
         else:
-            wavelength_range = self.experiments[0].beam.get_wavelength_range()
-            initial_wavelength = (wavelength_range[0] + wavelength_range[1]) / 2
+            # The peak wavelength of the incident spectrum, which falls back to
+            # the wavelength range midpoint if no peak wavelength is recorded
+            initial_wavelength = self.experiments[0].beam.get_peak_wavelength()
         assert initial_wavelength > 0.0
         reflections["wavelength"] = flex.double(n_rows, initial_wavelength)
         unit_s0 = self.experiments[0].beam.get_unit_s0()

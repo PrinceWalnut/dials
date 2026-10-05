@@ -11,7 +11,7 @@ from dxtbx.model import ExperimentList
 from dials.algorithms.shoebox import MaskCode
 from dials.algorithms.spot_finding import per_image_analysis
 from dials.array_family import flex
-from dials.util import log, show_mail_handle_errors
+from dials.util import laue, log, show_mail_handle_errors
 from dials.util.ascii_art import spot_counts_per_image_plot
 from dials.util.multi_dataset_handling import generate_experiment_identifiers
 from dials.util.options import ArgumentParser, flatten_experiments
@@ -44,6 +44,11 @@ Examples::
   dials.find_spots models.expt
 
   dials.find_spots models.expt output.reflections=strong.refl
+
+For Laue stills (data with a polychromatic beam imported as stills, for example
+pink-beam Laue data from NeXus files) the defaults change to those of
+laue.find_spots: spotfinder.force_2d=True and output.shoeboxes=False. Values set
+explicitly on the command line take precedence.
 """
 
 # Set the phil scope
@@ -217,17 +222,29 @@ def run(args=None, *, phil=working_phil, return_results=False) -> None:
 
     # Parse the command line
     params, options = parser.parse_args(args=args, show_diff_phil=False)
+
+    # Ensure we have a data block
+    experiments = flatten_experiments(params.input.experiments)
+
+    # Switch to Laue defaults for Laue stills
+    is_laue_stills = laue.is_laue_stills(experiments)
+    if is_laue_stills:
+        params = parser.apply_default_overrides(params, laue.find_spots_defaults)
+
     log.config(verbosity=options.verbose, logfile=params.output.log)
     logger.info(dials_version())
+
+    if is_laue_stills:
+        logger.info(
+            "Laue stills found: using Laue spot finding defaults "
+            "(values set by the user take precedence)\n"
+        )
 
     # Log the diff phil
     diff_phil = parser.diff_phil.as_str()
     if diff_phil != "":
         logger.info("The following parameters have been modified:\n")
         logger.info(diff_phil)
-
-    # Ensure we have a data block
-    experiments = flatten_experiments(params.input.experiments)
 
     if len(experiments) == 0:
         parser.print_help()

@@ -16,7 +16,7 @@ from libtbx import Auto
 
 from dials.algorithms.indexing import DialsIndexError, indexer
 from dials.array_family import flex
-from dials.util import log, show_mail_handle_errors
+from dials.util import laue, log, show_mail_handle_errors
 from dials.util.options import ArgumentParser, reflections_and_experiments_from_files
 from dials.util.slice import slice_reflections
 from dials.util.version import dials_version
@@ -53,6 +53,15 @@ Examples::
   dials.index imported.expt strong.refl unit_cell=37,79,79,90,90,90 space_group=P43212
 
   dials.index imported.expt strong.refl indexing.method=fft1d
+
+For Laue stills (data with a polychromatic beam imported as stills, for example
+pink-beam Laue data from NeXus files) the defaults change to suit Laue
+indexing with indexing.method=pink_indexer. The pink_indexer wavelength and
+percent_bandwidth are then taken from the peak wavelength and wavelength range
+of the beam. Pink-beam indexing needs a known unit cell and space group.
+Values set explicitly on the command line take precedence.
+
+  dials.index imported.expt strong.refl unit_cell=34.3,45.6,99.0,90,90,90 space_group=P212121
 """
 
 
@@ -263,9 +272,24 @@ def run(args=None, phil=working_phil):
 
     params, options = parser.parse_args(args=args, show_diff_phil=False)
 
+    reflections, experiments = reflections_and_experiments_from_files(
+        params.input.reflections, params.input.experiments
+    )
+
+    # Switch to Laue defaults for Laue stills
+    is_laue_stills = laue.is_laue_stills(experiments)
+    if is_laue_stills:
+        params = parser.apply_default_overrides(params, laue.index_defaults)
+
     # Configure the logging
     log.config(verbosity=options.verbose, logfile=params.output.log)
     logger.info(dials_version())
+
+    if is_laue_stills:
+        logger.info(
+            "Laue stills found: using Laue indexing defaults "
+            "(values set by the user take precedence)\n"
+        )
 
     # Log the diff phil
     diff_phil = parser.diff_phil.as_str()
@@ -273,13 +297,15 @@ def run(args=None, phil=working_phil):
         logger.info("The following parameters have been modified:\n")
         logger.info(diff_phil)
 
-    reflections, experiments = reflections_and_experiments_from_files(
-        params.input.reflections, params.input.experiments
-    )
-
     if len(experiments) == 0:
         parser.print_help()
         return
+
+    if is_laue_stills and params.indexing.method == "pink_indexer":
+        try:
+            laue.set_pink_indexer_wavelength_defaults(params, experiments)
+        except ValueError as e:
+            sys.exit(str(e))
 
     try:
         indexed_experiments, indexed_reflections = index(

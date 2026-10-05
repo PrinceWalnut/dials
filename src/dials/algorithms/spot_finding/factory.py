@@ -147,8 +147,9 @@ def generate_phil_scope():
       initial_wavelength = None
         .type = float(value_min=.1)
         .help = "Initial wavelength assignment for reflections from Laue data"
-                "If None, initial_wavelength will be set as the average of "
-                "beam.wavelength_range"
+                "If None, initial_wavelength will be set to the beam peak "
+                "wavelength, or the average of beam.wavelength_range if the "
+                "beam has no peak wavelength"
     }
   }
   """,
@@ -532,6 +533,7 @@ class SpotFinderFactory:
                 max_spot_size=params.spotfinder.filter.max_spot_size,
                 min_chunksize=params.spotfinder.mp.min_chunksize,
                 initial_wavelength=params.spotfinder.laue.initial_wavelength,
+                no_shoeboxes_2d=no_shoeboxes_2d,
             )
 
         filter_spots = SpotFinderFactory.configure_filter(params)

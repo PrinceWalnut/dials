@@ -408,6 +408,10 @@ class PhilCommandParser:
         # Set the working phil scope
         self._phil = self.system_phil.fetch(source=parse(""))
 
+        # The phil objects given by the user on the command line, kept so that
+        # the parameters can be re-resolved against different defaults
+        self._user_phils = []
+
     @property
     def phil(self):
         """
@@ -493,6 +497,7 @@ class PhilCommandParser:
                 unhandled.append(arg)
 
         # Fetch the phil parameters
+        self._user_phils = user_phils
         self._phil, unused = self.system_phil.fetch(
             sources=user_phils, track_unused_definitions=True
         )
@@ -583,6 +588,36 @@ class PhilCommandParser:
         self._phil = self.system_phil.format(python_object=params)
 
         return params, importer.unhandled
+
+    def apply_default_overrides(self, params, defaults):
+        """
+        Re-resolve already-parsed parameters against a different set of defaults.
+
+        This allows a program to change its defaults once it knows what kind of
+        data it is processing. Parameters that the user set explicitly, on the
+        command line or in a phil file, keep the user's value, even where that
+        value equals the original default. Every other parameter takes its
+        value from defaults, falling back to the original default. The input
+        data already loaded into params.input are kept unchanged.
+
+        :param params: The parameters returned by parse_args
+        :param defaults: A phil scope containing the new default values, or a
+                         list of phil scopes, each applied on top of the last
+        :return: The re-resolved parameters
+        """
+        if not isinstance(defaults, (list, tuple)):
+            defaults = [defaults]
+        working_phil = self.system_phil.fetch(sources=list(defaults)).fetch(
+            sources=self._user_phils
+        )
+        try:
+            new_params = working_phil.extract()
+        except Exception as e:
+            raise InvalidPhilError(e)
+        if hasattr(params, "input"):
+            new_params.input = params.input
+        self._phil = self.system_phil.format(python_object=new_params)
+        return new_params
 
     def _generate_input_scope(self):
         """
@@ -992,6 +1027,20 @@ class ArgumentParser(ArgumentParserBase):
         :returns: The diff phil scope
         """
         return self._phil_parser.diff_phil
+
+    def apply_default_overrides(self, params, defaults):
+        """
+        Re-resolve already-parsed parameters against a different set of
+        defaults, keeping any values the user set explicitly.
+
+        See PhilCommandParser.apply_default_overrides.
+
+        :param params: The parameters returned by parse_args
+        :param defaults: A phil scope containing the new default values, or a
+                         list of phil scopes, each applied on top of the last
+        :returns: The re-resolved parameters
+        """
+        return self._phil_parser.apply_default_overrides(params, defaults)
 
     def _strip_rst_markup(self, text):
         """

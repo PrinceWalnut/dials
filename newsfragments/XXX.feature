@@ -1,0 +1,1 @@
+``dials.import``: Pink-beam Laue data in NeXus (NXmx) files, read with a polychromatic beam, are now imported as stills by default. ``dials.find_spots`` and ``dials.index`` recognise Laue stills and switch to Laue defaults, with ``dials.index`` using ``pink_indexer`` and taking its wavelength and bandwidth from the beam.
