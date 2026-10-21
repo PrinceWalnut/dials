@@ -19,11 +19,17 @@ from dxtbx.model import ExperimentList, PolychromaticBeam
 
 logger = logging.getLogger(__name__)
 
-# dials.find_spots defaults for Laue stills (as in laue.find_spots)
+# dials.find_spots defaults for Laue stills (as in laue.find_spots), plus the
+# min_spot_size that min_spot_size=Auto gives for the CCD (Rayonix) data used in
+# the laue-dials serial pink-beam pipeline. Auto would otherwise give 3 for
+# NeXus data, as dxtbx reads every NeXus detector as a pixel-array detector.
 find_spots_defaults = libtbx.phil.parse(
     """
 spotfinder {
   force_2d = True
+  filter {
+    min_spot_size = 6
+  }
 }
 output {
   shoeboxes = False

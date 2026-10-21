@@ -136,9 +136,12 @@ def test_index_laue_default_overrides():
 
 def test_find_spots_laue_default_overrides():
     parser = ArgumentParser(phil=find_spots_phil)
-    params, _ = parser.parse_args(args=["output.shoeboxes=True"])
+    params, _ = parser.parse_args(
+        args=["output.shoeboxes=True", "spotfinder.filter.min_spot_size=3"]
+    )
     params = parser.apply_default_overrides(params, laue.find_spots_defaults)
     assert params.spotfinder.force_2d is True
+    assert params.spotfinder.filter.min_spot_size == 3
     # Set explicitly by the user, even though it is the standard default
     assert params.output.shoeboxes is True
 
@@ -146,5 +149,6 @@ def test_find_spots_laue_default_overrides():
     params = parser.apply_default_overrides(params, laue.find_spots_defaults)
     assert params.spotfinder.force_2d is True
     assert params.output.shoeboxes is False
+    assert params.spotfinder.filter.min_spot_size == 6
     # dials.find_spots-specific overrides are kept
     assert params.spotfinder.mp.nproc is libtbx.Auto

@@ -47,8 +47,9 @@ Examples::
 
 For Laue stills (data with a polychromatic beam imported as stills, for example
 pink-beam Laue data from NeXus files) the defaults change to those of
-laue.find_spots: spotfinder.force_2d=True and output.shoeboxes=False. Values set
-explicitly on the command line take precedence.
+laue.find_spots: spotfinder.force_2d=True and output.shoeboxes=False, with
+spotfinder.filter.min_spot_size=6. Values set explicitly on the command line
+take precedence.
 """
 
 # Set the phil scope
