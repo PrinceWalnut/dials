@@ -1,0 +1,1 @@
+Programs no longer load their input experiment and reflection files again when logging the parameters that were changed, and ``dials.index`` no longer keeps a second copy of each imageset's mask after indexing stills in parallel, reducing memory use and file reads.

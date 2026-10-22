@@ -129,3 +129,38 @@ foo = true
         'error: Invalid phil parameter: One True or False value expected, foo="bar" found'
         in captured.err
     )
+
+
+def test_diff_phil_reuses_loaded_input_files(tmp_path, monkeypatch):
+    from dxtbx.model import Beam
+    from dxtbx.model.experiment_list import ExperimentListFactory
+
+    from dials.array_family import flex
+
+    expt_file = tmp_path / "models.expt"
+    ExperimentList([Experiment(beam=Beam((0, 0, 1)))]).as_file(expt_file)
+    refl_file = tmp_path / "strong.refl"
+    reflections = flex.reflection_table()
+    reflections["id"] = flex.int([0, 0])
+    reflections.as_file(refl_file)
+
+    parser = ArgumentParser(
+        phil=libtbx.phil.parse("a = 1\n  .type = int"),
+        read_experiments=True,
+        read_reflections=True,
+        check_format=False,
+    )
+    params, _ = parser.parse_args([str(expt_file), str(refl_file), "a=2"])
+
+    # The diff phil should not load the input files again
+    loads = Mock()
+    monkeypatch.setattr(ExperimentListFactory, "from_json_file", loads)
+    monkeypatch.setattr(flex.reflection_table, "from_file", loads)
+    diff = parser.diff_phil.as_str()
+    assert loads.call_count == 0
+    assert "a = 2" in diff
+    assert str(expt_file) in diff and str(refl_file) in diff
+
+    # Phil parameters naming the input files still load them
+    parser.phil.extract()
+    assert loads.call_count == 2
