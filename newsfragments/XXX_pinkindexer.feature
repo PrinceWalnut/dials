@@ -1,0 +1,1 @@
+``dials.index``: ``pink_indexer`` is several times faster and uses a fraction of the memory, by evaluating the rotograms in batches. The new option ``pink_indexer.backend=torch`` runs the rotogram search with PyTorch (if installed), on a GPU if one is available (see ``pink_indexer.device``).

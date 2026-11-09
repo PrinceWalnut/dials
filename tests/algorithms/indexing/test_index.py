@@ -803,10 +803,14 @@ def test_stills_indexer_multi_lattice_bug_MosaicSauter2014(dials_data, tmp_path)
             assert crys.get_domain_size_ang() == pytest.approx(2689.0, rel=0.1)
 
 
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
 def test_pink_indexer(
     dials_data,
     tmp_path,
+    backend,
 ):
+    if backend == "torch":
+        pytest.importorskip("torch")
     data_dir = dials_data("cunir_serial_processed")
     expt_file = data_dir / "imported_with_ref_5.expt"
     refl_file = data_dir / "strong_5.refl"
@@ -827,6 +831,7 @@ def test_pink_indexer(
         "indexing.method=pink_indexer",
         "min_lattices=5",
         "percent_bandwidth=2",
+        f"pink_indexer.backend={backend}",
         'known_symmetry.space_group="P 21 3"',
         "known_symmetry.unit_cell=96.410,96.410,96.410,90.0,90.0,90.0",
     ]

@@ -9,6 +9,7 @@ from scipy.spatial.transform import Rotation
 
 import iotbx.phil
 from dxtbx.model import Crystal
+from libtbx import Auto
 from scitbx import matrix
 
 from dials.algorithms.indexing import DialsIndexError
@@ -43,50 +44,25 @@ pink_indexer
     min_lattices=1
         .type = int(value_min=1, value_max=100)
         .help = "(Deprecated) The minimum number of candidate lattices to generate."
+    backend = *numpy torch
+        .type = choice
+        .help = "The array library used to evaluate and discretize the rotograms. "
+                "torch requires PyTorch, and can run on a GPU (see device)."
+    device = Auto
+        .type = str
+        .help = "The PyTorch device used with backend=torch, for instance cpu, cuda, "
+                "cuda:1 or mps. Auto uses a CUDA or MPS GPU if one is available, and "
+                "the CPU otherwise."
+    max_rotations_per_batch = Auto
+        .type = int(value_min=1)
+        .help = "The maximum number of rotogram points evaluated at once, by "
+                "default 4000000 (1000000 with backend=torch on the CPU). Memory "
+                "use for the rotograms is roughly 100 bytes per point, on top of "
+                "4*(voxel_grid_points+1)^3 bytes for the voxel grid. With "
+                "backend=torch on a GPU, the batch is halved and retried if the GPU "
+                "runs out of memory."
 }
 """
-
-
-def rotvec_to_quaternion(rotvec, deg=False, eps=1e-32):
-    """
-    Convert rotation vector(s) to quaternion(s).
-    """
-    alpha = norm2(rotvec)
-    ax = rotvec / np.where(alpha == 0.0, np.inf, alpha)[..., None]
-    if deg:
-        alpha = np.deg2rad(alpha)
-    a2 = 0.5 * alpha
-    sa2 = np.sin(a2)
-    w = np.cos(a2)
-    x = sa2 * ax[..., 0]
-    y = sa2 * ax[..., 1]
-    z = sa2 * ax[..., 2]
-    return np.stack((x, y, z, w), axis=-1)
-
-
-def quaternion_multiply(a, b):
-    """
-    Multiply two quaternions, return a*b
-    """
-    # Expand a
-    ax = a[..., 0]
-    ay = a[..., 1]
-    az = a[..., 2]
-    aw = a[..., 3]
-
-    # Expand b
-    bx = b[..., 0]
-    by = b[..., 1]
-    bz = b[..., 2]
-    bw = b[..., 3]
-
-    # Calculate result
-    x = aw * bx + ax * bw + ay * bz - az * by
-    y = aw * by - ax * bz + ay * bw + az * bx
-    z = aw * bz + ax * by - ay * bx + az * bw
-    w = aw * bw - ax * bx - ay * by - az * bz
-
-    return np.dstack((x, y, z, w))
 
 
 def norm2(array, axis=-1, keepdims=False):
@@ -173,6 +149,188 @@ def generate_reciprocal_cell(cell, dmin, dtype=np.int32):
     return hkl
 
 
+def scaled_rotogram_rotvecs(hhat, qhat, cos_half_phi, sin_half_phi, xp=np):
+    """
+    Evaluate the rotograms for pairs of crystal-frame and lab-frame unit vectors.
+
+    Each rotogram point is a rotation by pi about mhat, the bisector of hhat and
+    qhat, which maps hhat onto qhat, followed by a rotation by phi about qhat. As
+    quaternions, Rm = (mhat, 0) and Rq = (sin(phi/2) qhat, cos(phi/2)), so
+        Rq * Rm = (cos(phi/2) mhat + sin(phi/2) qhat x mhat, -sin(phi/2) qhat.mhat)
+    which needs only per-pair cross and dot products.
+
+    Parameters
+    ----------
+    hhat : array
+        An n x 3 array of unit vectors in the crystal frame
+    qhat : array
+        An n x 3 array of unit vectors in the lab frame
+    cos_half_phi, sin_half_phi : array
+        Cosines and sines of half the rotogram angles, of length m
+    xp : module (optional)
+        The array library of the inputs, numpy (the default) or torch.
+
+    Returns
+    -------
+    scaled_rotvec : array
+        An n x m x 3 array of rotation vectors, each of angle theta in [0, pi],
+        rescaled to length arctan(theta / 4).
+    """
+    m = hhat + qhat
+    mhat = m / xp.sqrt((m * m).sum(-1))[:, None]
+    qx, qy, qz = qhat[:, 0], qhat[:, 1], qhat[:, 2]
+    mx, my, mz = mhat[:, 0], mhat[:, 1], mhat[:, 2]
+    qxm = xp.stack((qy * mz - qz * my, qz * mx - qx * mz, qx * my - qy * mx), -1)
+    xyz = (
+        cos_half_phi[None, :, None] * mhat[:, None, :]
+        + sin_half_phi[None, :, None] * qxm[:, None, :]
+    )
+    w = -sin_half_phi[None, :] * (qhat * mhat).sum(-1)[:, None]
+
+    # Taking |w| picks the quaternion sign giving theta in [0, pi]
+    sin_half_theta = xp.sqrt((xyz * xyz).sum(-1))
+    theta = 2.0 * xp.arctan2(sin_half_theta, xp.abs(w))
+
+    # Scaling the general rotvec norm by this factor makes the discretization more uniform
+    # without this, the rotations would be biased toward higher angles
+    scale = xp.arctan(theta / 4.0) / sin_half_theta
+    scale = xp.where(w < 0, -scale, scale)
+    return xyz * scale[..., None]
+
+
+def rotogram_voxels_numpy(hhat, qhat, phi, bins, max_rotations_per_batch=None):
+    """
+    Count the rotogram points of each pair of hhat and qhat falling in each voxel
+    of the grid with the given (uniformly spaced) bin edges along each axis,
+    using numpy.
+    """
+    n = len(bins) + 1
+    bin_min = float(bins[0])
+    inv_bin_width = (len(bins) - 1) / float(bins[-1] - bins[0])
+    voxels = np.zeros(n**3, dtype=np.int32)
+    cos_half_phi, sin_half_phi = np.cos(phi / 2), np.sin(phi / 2)
+    # Larger batches amortize the cost of np.bincount over the whole voxel grid
+    max_rotations_per_batch = max_rotations_per_batch or 4000000
+    batch = max(1, max_rotations_per_batch // len(phi))
+    for start in range(0, len(hhat), batch):
+        rotvecs = scaled_rotogram_rotvecs(
+            hhat[start : start + batch],
+            qhat[start : start + batch],
+            cos_half_phi,
+            sin_half_phi,
+        )
+        # Equivalent to np.digitize(rotvecs, bins), without a binary search.
+        # fmin and fmax put NaNs in the last bin, as np.digitize does.
+        idx = np.floor((rotvecs - bin_min) * inv_bin_width)
+        idx = np.fmax(np.fmin(idx, n - 2), -1).astype(np.int64) + 1
+        flat_idx = (idx[..., 0] * n + idx[..., 1]) * n + idx[..., 2]
+        voxels += np.bincount(flat_idx.ravel(), minlength=n**3).astype(np.int32)
+    return voxels.reshape((n, n, n))
+
+
+def torch_device(device="auto"):
+    """
+    The torch.device for a device name, where auto chooses a CUDA or MPS GPU if
+    one is available, and the CPU otherwise.
+    """
+    import torch
+
+    if device == "auto":
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    device = torch.device(device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("MPS is not available")
+    return device
+
+
+def rotogram_voxels_torch(
+    hhat, qhat, phi, bins, max_rotations_per_batch=None, device="auto"
+):
+    """
+    Count the rotogram points of each pair of hhat and qhat falling in each voxel
+    of the grid with the given (uniformly spaced) bin edges along each axis,
+    using torch on the given device. If the device runs out of memory, the
+    batch is halved and retried.
+    """
+    import torch
+
+    device = torch_device(device)
+    hhat, qhat, phi = (
+        torch.as_tensor(np.ascontiguousarray(a), device=device)
+        for a in (hhat, qhat, phi)
+    )
+    n = len(bins) + 1
+    bin_min = float(bins[0])
+    inv_bin_width = (len(bins) - 1) / float(bins[-1] - bins[0])
+    voxels = torch.zeros(n**3, dtype=torch.int32, device=device)
+    one = torch.ones(1, dtype=torch.int32, device=device)
+    cos_half_phi, sin_half_phi = torch.cos(phi / 2), torch.sin(phi / 2)
+    # Smaller batches are faster on the CPU, as they stay in cache, and larger
+    # batches are faster on a GPU, needing fewer kernel launches
+    if not max_rotations_per_batch:
+        max_rotations_per_batch = 1000000 if device.type == "cpu" else 4000000
+    batch = max(1, max_rotations_per_batch // len(phi))
+    start = 0
+    while start < len(hhat):
+        try:
+            rotvecs = scaled_rotogram_rotvecs(
+                hhat[start : start + batch],
+                qhat[start : start + batch],
+                cos_half_phi,
+                sin_half_phi,
+                xp=torch,
+            )
+            # Equivalent to torch.bucketize(rotvecs, bins, right=True), without
+            # a binary search, with NaNs in the last bin
+            idx = torch.floor((rotvecs - bin_min) * inv_bin_width)
+            idx = idx.nan_to_num_(nan=n - 2).clamp_(-1, n - 2).to(torch.int64).add_(1)
+            del rotvecs
+            flat_idx = ((idx[..., 0] * n + idx[..., 1]) * n + idx[..., 2]).ravel()
+            del idx
+            voxels.scatter_add_(0, flat_idx, one.expand(len(flat_idx)))
+            del flat_idx
+        except torch.OutOfMemoryError:
+            if batch == 1:
+                raise
+            batch = max(1, batch // 2)
+            logger.debug(
+                "Out of memory on %s, retrying with %d rotograms per batch",
+                device,
+                batch,
+            )
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            continue
+        start += batch
+    return voxels.reshape((n, n, n)).cpu().numpy()
+
+
+def top_voxels_cutoff(voxels, target):
+    """
+    The voxel count above which lie the target number of highest-count voxels,
+    or fewer if there is a tie at the cutoff. Equivalent to
+    np.quantile(voxels, (voxels.size - target) / voxels.size) for an integer
+    voxel grid, but computed from a histogram of the counts.
+    """
+    if not np.issubdtype(voxels.dtype, np.integer):
+        return np.quantile(voxels, (voxels.size - target) / voxels.size)
+    # Number of voxels with a count >= each count value
+    at_least = np.cumsum(np.bincount(voxels.ravel())[::-1])[::-1]
+    # The target'th and (target + 1)'th highest counts
+    kth = np.flatnonzero(at_least >= target)[-1]
+    next_kth = np.flatnonzero(at_least >= target + 1)[-1]
+    if kth == next_kth:
+        return kth
+    return 0.5 * (kth + next_kth)
+
+
 class Indexer:
     """
     A class which implements the PinkIndexer algorithm.
@@ -199,10 +357,12 @@ class Indexer:
         max_refls=50,
         rotogram_grid_points=200,
         voxel_grid_points=200,
-        int_dtype="uint8",
         float_dtype="float32",
         target_lattices=1,
         dilate_r=None,
+        backend="numpy",
+        device="auto",
+        max_rotations_per_batch=None,
     ):
         """
         Args:
@@ -210,10 +370,12 @@ class Indexer:
             max_refls (int, optional): The maximum number of refls to consider.
             rotogram_grid_points (int, optional): The number of points at which to evaluate the rotograms.
             voxel_grid_points (int, optional): The fineness of the discretization used to quantitate rotograms.
-            int_dtype (str or dtype, optional): the dtype to use for the voxel grid
             float_dtype (str or dtype, optional): the dtype to use for floating point values
             target_lattices (int, optional): the target number of candidate lattices returned by this function
             dilate_r (float, optional): optionally dilate the voxel grid by a kernel with this radius in pixels.
+            backend (str, optional): evaluate the rotograms with "numpy" or "torch".
+            device (str, optional): the torch device for backend="torch", or "auto".
+            max_rotations_per_batch (int, optional): the maximum number of rotogram points evaluated at once, or None for a default for the backend.
 
         Returns:
             iter_UB: an interable of crystal bases as numpy arrays
@@ -255,50 +417,32 @@ class Indexer:
         hhat = hhat[j]
         qhat = qhat[i]
 
-        # mhat bisects hhat and qhat
-        m = hhat + qhat
-        mhat = normalize(m)
-
-        # construct a rotation that maps hhat onto qhat
-        Rm = rotvec_to_quaternion(np.pi * mhat)
-
-        # construct rotations about qhat
+        # Rotogram angles about qhat
         phimin = -np.pi
         phimax = np.pi
         phi = np.linspace(
             phimin, phimax, rotogram_grid_points + 1, dtype=self.float_dtype
         )[:-1]
-        rotvec = qhat[:, None, :] * phi[None, :, None]
-        Rq = rotvec_to_quaternion(rotvec)
 
-        # combine mhat and qhat rotations into general rotation
-        quat = quaternion_multiply(Rq, Rm[:, None, :])
-        flat_quat = quat.reshape((-1, 4))
-        rotvec = (
-            Rotation.from_quat(flat_quat).as_rotvec().reshape(quat.shape[:-1] + (-1,))
-        )
-        theta = norm2(rotvec)
-        axis = rotvec / theta[..., None]
-
-        # Scaling the general rotvec norm by this factor makes the discretization more uniform
-        # without this, the rotations would be biased toward higher angles
-        scales = np.arctan(theta / 4.0)
-        scaled_rotvec = axis * scales[..., None]
-
-        # Discretize scaled rotvecs
+        # Bin edges for discretizing the scaled rotvecs
         scale_max = np.arctan(np.pi / 4.0)
         bins = np.linspace(-scale_max, scale_max, voxel_grid_points)
-        idx = np.digitize(scaled_rotvec, bins)
 
         # This is how to calculate the bin centers to extract the rotation matrix from the voxel grid
         bin_centers = np.concatenate(
             (bins[[0]], 0.5 * (bins[1:] + bins[:-1]), bins[[-1]])
         )
 
-        # Map discretized rotvecs into voxel grid
-        n = voxel_grid_points + 1
-        voxels = np.zeros((n, n, n), dtype=int_dtype)
-        np.add.at(voxels, tuple(idx.transpose((2, 0, 1))), 1)
+        # Map discretized rotvecs for all rotograms into voxel grid
+        bins = bins.astype(self.float_dtype)
+        if backend == "torch":
+            voxels = rotogram_voxels_torch(
+                hhat, qhat, phi, bins, max_rotations_per_batch, device=device
+            )
+        else:
+            voxels = rotogram_voxels_numpy(
+                hhat, qhat, phi, bins, max_rotations_per_batch
+            )
 
         # Optionally dilate the voxel grid
         if dilate_r is not None:
@@ -317,9 +461,7 @@ class Indexer:
             voxels = fftconvolve(voxels, kernel, mode="same")
 
         # Possible solutions are voxels with the highest density
-        num_voxels = voxels.size
-        target_probability = (num_voxels - target_lattices) / num_voxels
-        cutoff = np.quantile(voxels, target_probability)
+        cutoff = top_voxels_cutoff(voxels, target_lattices)
         idx = np.where(voxels > cutoff)
         asort = np.argsort(voxels[idx])
         sortidx = tuple(i[asort[::-1]] for i in idx)  # Descending order
@@ -394,6 +536,20 @@ class PinkIndexer(Strategy):
             )
             params.target_lattices = params.min_lattices
         self.target_lattices = params.target_lattices
+        self.backend = params.backend
+        self.device = "auto" if params.device in (None, Auto) else params.device
+        self.max_rotations_per_batch = params.max_rotations_per_batch
+        if self.max_rotations_per_batch is Auto:
+            self.max_rotations_per_batch = None
+        if self.backend == "torch":
+            try:
+                torch_device(self.device)
+            except ImportError:
+                raise DialsIndexError(
+                    "pink_indexer.backend=torch requires PyTorch, which is not installed"
+                )
+            except RuntimeError as e:
+                raise DialsIndexError(f"Invalid pink_indexer.device={self.device}: {e}")
 
     def find_crystal_models(self, reflections, experiments):
         """Find a list of candidate crystal models.
@@ -464,6 +620,9 @@ class PinkIndexer(Strategy):
             rotogram_grid_points=self.rotogram_grid_points,
             voxel_grid_points=self.voxel_grid_points,
             target_lattices=self.target_lattices,
+            backend=self.backend,
+            device=self.device,
+            max_rotations_per_batch=self.max_rotations_per_batch,
         ):
             real_a, real_b, real_c = np.linalg.inv(UB.astype("double"))
             crystal = Crystal(real_a, real_b, real_c, self.spacegroup)
