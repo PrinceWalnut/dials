@@ -15,6 +15,7 @@ from dxtbx.model.experiment_list import ExperimentList
 from libtbx import Auto
 
 from dials.algorithms.indexing import DialsIndexError, indexer
+from dials.algorithms.indexing.laue_optimisation import optimise_laue_indexing
 from dials.array_family import flex
 from dials.util import laue, log, show_mail_handle_errors
 from dials.util.options import ArgumentParser, reflections_and_experiments_from_files
@@ -59,7 +60,11 @@ pink-beam Laue data from NeXus files) the defaults change to suit Laue
 indexing with indexing.method=pink_indexer. The pink_indexer wavelength and
 percent_bandwidth are then taken from the peak wavelength and wavelength range
 of the beam. Pink-beam indexing needs a known unit cell and space group.
-Values set explicitly on the command line take precedence.
+Values set explicitly on the command line take precedence. After indexing, the
+Miller indices, the wavelength of each reflection and the crystal orientations
+are then optimised jointly, as laue.optimize_indexing does (see the laue scope;
+set laue.assign_wavelengths=False to skip this). The wavelength column of the
+output reflections then holds the wavelength of each reflection.
 
   dials.index imported.expt strong.refl unit_cell=34.3,45.6,99.0,90,90,90 space_group=P212121
 """
@@ -87,6 +92,13 @@ indexing {
 }
 
 include scope dials.algorithms.refinement.refiner.phil_scope
+
+laue
+  .help = "Options for Laue stills (data with a polychromatic beam imported as"
+          "stills)"
+{
+  include scope dials.algorithms.indexing.laue_optimisation.phil_scope
+}
 
 output {
   experiments = indexed.expt
@@ -313,6 +325,11 @@ def run(args=None, phil=working_phil):
         )
     except (DialsIndexError, ValueError) as e:
         sys.exit(str(e))
+
+    if is_laue_stills and params.laue.assign_wavelengths:
+        indexed_reflections = optimise_laue_indexing(
+            indexed_experiments, indexed_reflections, experiments, params.laue
+        )
 
     # Copy history from the imported experiments to the output
     history = experiments.consolidate_histories()
