@@ -1215,3 +1215,29 @@ def test_rigaku_hypix_arc_100(dials_data, tmp_path):
     expts = ExperimentList.from_file(tmp_path / "indexed.expt", check_format=False)
     assert len(expts) == 3
     assert len(expts.crystals()) == 1  # joint indexing
+
+
+def test_copy_params_without_input(dials_data):
+    from dials.command_line.index import _copy_params_without_input, working_phil
+    from dials.util.options import ArgumentParser
+
+    data_dir = dials_data("insulin_processed", pathlib=True)
+    parser = ArgumentParser(
+        phil=working_phil,
+        read_reflections=True,
+        read_experiments=True,
+        check_format=False,
+    )
+    params, _ = parser.parse_args(
+        [str(data_dir / "imported.expt"), str(data_dir / "strong.refl")]
+    )
+    params.indexing.nproc = 3
+
+    copied = _copy_params_without_input(params)
+
+    assert copied.input is None
+    assert copied.indexing.nproc == 3
+    assert copied.indexing is not params.indexing
+    # The original parameters keep their input data
+    assert len(params.input.experiments) == 1
+    assert len(params.input.reflections) == 1

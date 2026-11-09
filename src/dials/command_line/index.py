@@ -149,6 +149,23 @@ def _index_experiments(
     return idxr.refined_experiments, idx_refl
 
 
+def _copy_params_without_input(params):
+    """
+    A deep copy of the parameters, leaving out the input data, which indexing
+    does not use. Copying the input experiments and reflections (with, for
+    example, a mask for every imageset) can take a lot of time and memory, and
+    a copy is made for every imageset when indexing stills.
+    """
+    params_input = getattr(params, "input", None)
+    if params_input is None:
+        return copy.deepcopy(params)
+    params.input = None
+    try:
+        return copy.deepcopy(params)
+    finally:
+        params.input = params_input
+
+
 def index(experiments, reflections, params):
     """
     Index the input experiments and reflections.
@@ -216,7 +233,7 @@ def index(experiments, reflections, params):
         indexed_experiments, indexed_reflections = _index_experiments(
             experiments,
             reflections,
-            copy.deepcopy(params),
+            _copy_params_without_input(params),
             known_crystal_models=known_crystal_models,
         )
     else:
@@ -244,7 +261,7 @@ def index(experiments, reflections, params):
                         _index_experiments,
                         elist,
                         refl,
-                        copy.deepcopy(params),
+                        _copy_params_without_input(params),
                         known_crystal_models=known_crystal_models_this,
                         log_text=f"Indexing imageset id {iset_id} ({iset_id + 1}/{len(experiments.imagesets())})",
                     )
