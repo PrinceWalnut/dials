@@ -248,18 +248,23 @@ def index(experiments, reflections, params):
                         known_crystal_models=known_crystal_models_this,
                         log_text=f"Indexing imageset id {iset_id} ({iset_id + 1}/{len(experiments.imagesets())})",
                     )
-                ] = iset_id
+                ] = (iset_id, imgset)
 
             tables_list = []
             for future in concurrent.futures.as_completed(futures):
                 try:
-                    iset_id = futures[future]
+                    iset_id, imgset = futures[future]
                     idx_expts, idx_refl = future.result()
                 except DialsIndexError as e:
                     logger.warning(str(e))
                 else:
                     if idx_expts is None:
                         continue
+                    # Use the original imageset rather than the copy returned
+                    # from the worker process, which holds its own copies of
+                    # any external lookup data (such as a mask)
+                    for expt in idx_expts:
+                        expt.imageset = imgset
                     # reset the imageset id to the original
                     idx_refl["imageset_id"] = flex.int(idx_refl.size(), iset_id)
                     tables_list.append(idx_refl)

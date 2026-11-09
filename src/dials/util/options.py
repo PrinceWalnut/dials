@@ -408,6 +408,10 @@ class PhilCommandParser:
         # Set the working phil scope
         self._phil = self.system_phil.fetch(source=parse(""))
 
+        # The input files loaded into the working phil, so that the diff phil
+        # can reuse them rather than load them again
+        self._loaded_inputs = {}
+
         # The phil objects given by the user on the command line, kept so that
         # the parameters can be re-resolved against different defaults
         self._user_phils = []
@@ -437,7 +441,24 @@ class PhilCommandParser:
 
         :return: The difference phil scope
         """
-        return self.system_phil.fetch_diff(source=self.phil)
+        from dials.util.phil import reuse_loaded_inputs
+
+        with reuse_loaded_inputs(self._loaded_inputs):
+            return self.system_phil.fetch_diff(source=self.phil)
+
+    def _set_working_phil(self, params):
+        """
+        Set the working phil from extracted parameters, recording the input
+        files they hold.
+
+        :param params: The extracted parameters
+        """
+        self._phil = self.system_phil.format(python_object=params)
+        params_input = getattr(params, "input", None)
+        self._loaded_inputs = {
+            "experiment_list": list(getattr(params_input, "experiments", None) or []),
+            "reflection_table": list(getattr(params_input, "reflections", None) or []),
+        }
 
     def parse_args(
         self, args, verbose=False, return_unhandled=False, quick_parse=False
@@ -585,7 +606,7 @@ class PhilCommandParser:
             params.input.reflections.append(obj)
 
         # Convert to phil
-        self._phil = self.system_phil.format(python_object=params)
+        self._set_working_phil(params)
 
         return params, importer.unhandled
 
@@ -616,7 +637,7 @@ class PhilCommandParser:
             raise InvalidPhilError(e)
         if hasattr(params, "input"):
             new_params.input = params.input
-        self._phil = self.system_phil.format(python_object=new_params)
+        self._set_working_phil(new_params)
         return new_params
 
     def _generate_input_scope(self):

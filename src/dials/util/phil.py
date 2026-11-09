@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import os
 import re
 
@@ -11,6 +12,32 @@ from libtbx.utils import Sorry
 from dials.array_family import flex
 
 FilenameDataWrapper = collections.namedtuple("FilenameDataWrapper", "filename, data")
+
+# Already-loaded input files, by (phil type, filename), that the converters use
+# instead of loading the files again. Set with reuse_loaded_inputs.
+_loaded_inputs = {}
+
+
+@contextlib.contextmanager
+def reuse_loaded_inputs(wrappers):
+    """
+    Within this context, converting the experiment list and reflection table
+    parameters with the given FilenameDataWrapper values from phil returns
+    those values, rather than loading the files again.
+
+    :param wrappers: A dict of FilenameDataWrapper values by phil type
+    """
+    global _loaded_inputs
+    previous = _loaded_inputs
+    _loaded_inputs = {
+        (phil_type, wrapper.filename): wrapper
+        for phil_type, values in wrappers.items()
+        for wrapper in values
+    }
+    try:
+        yield
+    finally:
+        _loaded_inputs = previous
 
 
 class ExperimentListConverters:
@@ -30,6 +57,8 @@ class ExperimentListConverters:
             return None
         if s == "<image files>":
             return FilenameDataWrapper(filename=s, data=None)
+        if (self.phil_type, s) in _loaded_inputs:
+            return _loaded_inputs[(self.phil_type, s)]
         if not os.path.exists(s):
             raise Sorry(f"File {s} does not exist")
         return FilenameDataWrapper(
@@ -59,6 +88,8 @@ class ReflectionTableConverters:
         s = libtbx.phil.str_from_words(words=words)
         if s is None:
             return None
+        if (self.phil_type, s) in _loaded_inputs:
+            return _loaded_inputs[(self.phil_type, s)]
         if not os.path.exists(s):
             raise Sorry(f"File {s} does not exist")
         return FilenameDataWrapper(filename=s, data=flex.reflection_table.from_file(s))
