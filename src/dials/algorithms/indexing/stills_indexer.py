@@ -642,7 +642,14 @@ class StillsIndexer(Indexer):
                     force_stills=True,
                     spherical_relp=params.refinement.parameterisation.spherical_relp_model,
                 )
-                rmsd, _ = calc_2D_rmsd_and_displacements(ref_predictor(indexed))
+                indexed = ref_predictor(indexed)
+                # Leave out reflections the candidate cannot predict on the
+                # detector (which can happen for Laue data, where each
+                # reflection's wavelength depends on the crystal model)
+                indexed = indexed.select(indexed.get_flags(indexed.flags.predicted))
+                if len(indexed) == 0:
+                    continue
+                rmsd, _ = calc_2D_rmsd_and_displacements(indexed)
                 candidates.append(
                     CandidateInfo(
                         crystal=cm,

@@ -1609,7 +1609,20 @@ namespace dials { namespace algorithms {
         p.s0_cal.push_back(s0);
 
       } catch (dxtbx::error const&) {
-        // do nothing
+        if (panel >= 0) {
+          // Predicting for a given reflection: keep a row for it, not flagged
+          // as predicted, so that the rows match those of the input (as for
+          // the scan static predictor)
+          p.hkl.push_back(h);
+          p.enter.push_back(ray.entering);
+          p.s1.push_back(ray.s1);
+          p.xyz_mm.push_back(vec3<double>(0, 0, 0));
+          p.xyz_px.push_back(vec3<double>(0, 0, 0));
+          p.panel.push_back(panel);
+          p.flags.push_back(0);
+          p.wavelength_cal.push_back(wavelength);
+          p.s0_cal.push_back(s0);
+        }
       }
     }
 
