@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+import libtbx
 import libtbx.phil
 from dxtbx.model import ExperimentList, PolychromaticBeam
 
@@ -127,6 +128,59 @@ refinement {
 # The dials.index Laue defaults, in the order they are applied
 index_defaults = [laue_index_defaults, serial_pipeline_index_overrides]
 
+# dials.refine defaults for Laue stills: those of the laue.refine program from
+# laue-dials, which the laue-dials serial pink-beam pipeline
+# (examples/serial_pipeline.sh) uses unchanged, except for the weighting
+# strategy. laue.refine uses stills weighting, as it refines a monochromatic
+# beam for each reflection; statistical weighting is used here, which DIALS
+# refinement uses as Laue statistical weighting for a polychromatic beam.
+# Not reproduced are the output filenames, the laue.refine nproc setting (the
+# number of images refined in parallel) and refinery.engine=SparseLevMar.
+#
+# TODO: DIALS has no sparse Laue refinement target (nor sparse Laue prediction
+# parameterisation), so SparseLevMar fails for Laue data and the default LevMar
+# engine is kept for now. Add a sparse Laue target, then use SparseLevMar as
+# laue.refine does.
+refine_defaults = libtbx.phil.parse(
+    """
+refinement {
+  reflections {
+    weighting_strategy {
+      override = statistical
+    }
+    outlier {
+      nproc = 1
+      minimum_number_of_reflections = 1
+      algorithm = mcd
+      separate_images = True
+    }
+  }
+  parameterisation {
+    beam {
+      fix = *in_spindle_plane *out_spindle_plane
+    }
+    crystal {
+      unit_cell {
+        # laue.refine sets fix_list = real_space_a to fix the a-axis, but no
+        # unit cell parameter name (g_param_0, g_param_1, ...) contains it, so
+        # it fixes nothing. Auto is worked out from the crystal model by
+        # set_unit_cell_fix_list_defaults, as the parameter for the a-axis
+        fix_list = Auto
+      }
+    }
+    detector {
+      fix = distance
+    }
+    auto_reduction {
+      action = fix
+      min_nref_per_parameter = 1
+    }
+    spherical_relp_model = True
+  }
+}
+"""
+)
+
 
 def is_laue_beam(beam) -> bool:
     """True if the beam is a polychromatic (Laue) beam."""
@@ -204,3 +258,64 @@ def set_pink_indexer_wavelength_defaults(params, experiments: ExperimentList):
             "wavelength range",
             percent_bandwidth,
         )
+
+
+def unit_cell_a_axis_parameter(crystal) -> str:
+    """
+    The name of the refinement parameter of the crystal unit cell for its a-axis.
+
+    The unit cell is refined with the independent elements of the reciprocal
+    metrical matrix G* allowed by the space group, as parameters g_param_0,
+    g_param_1, ... The parameter for the a-axis is the one on which G*_11
+    (a*.a*) depends. Which this is depends on the lattice (for example,
+    g_param_0 for an orthorhombic and g_param_1 for a hexagonal cell). Where
+    the space group makes a and b (or a, b and c) equivalent, the parameter is
+    shared by those axes.
+    """
+    from scitbx import matrix
+
+    from dials.algorithms.refinement.parameterisation.crystal_parameters import (
+        CrystalUnitCellParameterisation,
+    )
+
+    parameterisation = CrystalUnitCellParameterisation(crystal)
+    B = matrix.sqr(crystal.get_B())
+    # d(G*_11)/dp for G* = B^T B
+    dG11_dp = [
+        abs((dB.transpose() * B + B.transpose() * dB)[0])
+        for dB in parameterisation.get_ds_dp()
+    ]
+    largest = max(dG11_dp)
+    a_axis_parameters = [
+        name
+        for name, d in zip(parameterisation.get_param_names(), dG11_dp)
+        if d > 1e-6 * largest
+    ]
+    assert len(a_axis_parameters) == 1, a_axis_parameters
+    return a_axis_parameters[0]
+
+
+def set_unit_cell_fix_list_defaults(params, experiments: ExperimentList):
+    """
+    Fill in a refinement unit cell fix_list of Auto to fix the a-axis
+    parameter of the crystal unit cell, worked out from the crystal models.
+    """
+    unit_cell = params.refinement.parameterisation.crystal.unit_cell
+    if unit_cell.fix_list is not libtbx.Auto:
+        return
+    crystals = experiments.crystals()
+    if not crystals:
+        unit_cell.fix_list = None
+        return
+    name = unit_cell_a_axis_parameter(crystals[0])
+    if any(unit_cell_a_axis_parameter(crystal) != name for crystal in crystals[1:]):
+        logger.warning(
+            "Crystals have differing unit cell parameterisations: using the first "
+            "crystal to choose the unit cell parameter to fix"
+        )
+    unit_cell.fix_list = [name]
+    logger.info(
+        "Setting refinement.parameterisation.crystal.unit_cell.fix_list=%s, "
+        "the unit cell parameter for the a-axis",
+        name,
+    )

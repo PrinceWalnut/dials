@@ -12,6 +12,12 @@ Examples::
   dials.refine indexed.expt indexed.refl
 
   dials.refine indexed.expt indexed.refl scan_varying=(False/True/Auto)
+
+For Laue stills (data with a polychromatic beam imported as stills, for example
+pink-beam Laue data from NeXus files) the defaults change to those of
+laue.refine, but with refinement.reflections.weighting_strategy.override=statistical,
+and with the unit cell parameter for the a-axis fixed. Values set explicitly on
+the command line take precedence.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from dials.algorithms.refinement import (
 )
 from dials.algorithms.refinement.corrgram import create_correlation_plots
 from dials.array_family import flex
+from dials.util import laue
 from dials.util.options import ArgumentParser, reflections_and_experiments_from_files
 from dials.util.version import dials_version
 
@@ -575,6 +582,11 @@ def run(args=None, phil=working_phil):
         params.input.reflections, params.input.experiments
     )
 
+    # Switch to Laue defaults for Laue stills
+    is_laue_stills = laue.is_laue_stills(experiments)
+    if is_laue_stills:
+        params = parser.apply_default_overrides(params, laue.refine_defaults)
+
     # Configure the logging
     dials.util.log.config(verbosity=options.verbose, logfile=params.output.log)
 
@@ -596,6 +608,13 @@ def run(args=None, phil=working_phil):
             sys.exit(msg.format(key))
 
     logger.info(dials_version())
+
+    if is_laue_stills:
+        logger.info(
+            "Laue stills found: using Laue refinement defaults "
+            "(values set by the user take precedence)\n"
+        )
+        laue.set_unit_cell_fix_list_defaults(params, experiments)
 
     # Log the diff phil
     diff_phil = parser.diff_phil.as_str()

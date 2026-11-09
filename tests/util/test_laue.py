@@ -3,10 +3,13 @@ from __future__ import annotations
 import pytest
 
 import libtbx
-from dxtbx.model import BeamFactory, Experiment, ExperimentList, Scan
+from cctbx import sgtbx, uctbx
+from dxtbx.model import BeamFactory, Crystal, Experiment, ExperimentList, Scan
+from scitbx import matrix
 
 from dials.command_line.find_spots import working_phil as find_spots_phil
 from dials.command_line.index import working_phil as index_phil
+from dials.command_line.refine import working_phil as refine_phil
 from dials.util import laue
 from dials.util.options import ArgumentParser
 
@@ -152,3 +155,90 @@ def test_find_spots_laue_default_overrides():
     assert params.spotfinder.filter.min_spot_size == 6
     # dials.find_spots-specific overrides are kept
     assert params.spotfinder.mp.nproc is libtbx.Auto
+
+
+def test_refine_laue_default_overrides():
+    parser = ArgumentParser(phil=refine_phil)
+    params, _ = parser.parse_args(
+        args=[
+            "refinement.reflections.weighting_strategy.override=stills",
+            "refinement.reflections.outlier.algorithm=tukey",
+        ]
+    )
+    params = parser.apply_default_overrides(params, laue.refine_defaults)
+    refinement = params.refinement
+    assert refinement.reflections.weighting_strategy.override == "stills"
+    assert refinement.reflections.outlier.algorithm == "tukey"
+    assert refinement.reflections.outlier.minimum_number_of_reflections == 1
+
+    params, _ = parser.parse_args(args=[])
+    params = parser.apply_default_overrides(params, laue.refine_defaults)
+    refinement = params.refinement
+    assert refinement.reflections.weighting_strategy.override == "statistical"
+    # The laue.refine defaults
+    outlier = refinement.reflections.outlier
+    assert outlier.nproc == 1
+    assert outlier.minimum_number_of_reflections == 1
+    assert outlier.algorithm == "mcd"
+    assert outlier.separate_images is True
+    parameterisation = refinement.parameterisation
+    assert parameterisation.beam.fix == ["in_spindle_plane", "out_spindle_plane"]
+    # Worked out from the crystal model by set_unit_cell_fix_list_defaults
+    assert parameterisation.crystal.unit_cell.fix_list is libtbx.Auto
+    assert parameterisation.detector.fix == "distance"
+    assert parameterisation.auto_reduction.action == "fix"
+    assert parameterisation.auto_reduction.min_nref_per_parameter == 1
+    assert parameterisation.spherical_relp_model is True
+    # dials.refine defaults that laue.refine does not change are kept
+    assert parameterisation.scan_varying is libtbx.Auto
+    # SparseLevMar in laue.refine, but DIALS has no sparse Laue target
+    assert refinement.refinery.engine == "LevMar"
+    assert params.output.experiments == "refined.expt"
+
+
+def _crystal(space_group, cell):
+    # Real space axes are the columns of the orthogonalisation matrix
+    axes = matrix.sqr(uctbx.unit_cell(cell).orthogonalization_matrix()).transpose()
+    return Crystal(
+        axes[0:3],
+        axes[3:6],
+        axes[6:9],
+        space_group=sgtbx.space_group_info(space_group).group(),
+    )
+
+
+@pytest.mark.parametrize(
+    "space_group,cell,expected",
+    [
+        ("P 21 21 21", (34.297, 45.552, 99.035, 90, 90, 90), "g_param_0"),
+        ("P 1 2 1", (34, 45, 99, 90, 105, 90), "g_param_0"),
+        ("P 1", (34, 45, 99, 80, 95, 100), "g_param_0"),
+        ("P 4", (45, 45, 99, 90, 90, 90), "g_param_0"),
+        ("P 6", (45, 45, 99, 90, 90, 120), "g_param_1"),
+        ("P 2 3", (45, 45, 45, 90, 90, 90), "g_param_0"),
+    ],
+)
+def test_unit_cell_a_axis_parameter(space_group, cell, expected):
+    assert laue.unit_cell_a_axis_parameter(_crystal(space_group, cell)) == expected
+
+
+def test_set_unit_cell_fix_list_defaults():
+    crystal = _crystal("P 6", (45, 45, 99, 90, 90, 120))
+    experiments = ExperimentList([Experiment(beam=_laue_beam(), crystal=crystal)])
+    parser = ArgumentParser(phil=refine_phil)
+
+    params, _ = parser.parse_args(args=[])
+    params = parser.apply_default_overrides(params, laue.refine_defaults)
+    laue.set_unit_cell_fix_list_defaults(params, experiments)
+    assert params.refinement.parameterisation.crystal.unit_cell.fix_list == [
+        "g_param_1"
+    ]
+
+    # Set explicitly by the user
+    for value, expected in (("g_param_0", ["g_param_0"]), ("None", None)):
+        params, _ = parser.parse_args(
+            args=[f"refinement.parameterisation.crystal.unit_cell.fix_list={value}"]
+        )
+        params = parser.apply_default_overrides(params, laue.refine_defaults)
+        laue.set_unit_cell_fix_list_defaults(params, experiments)
+        assert params.refinement.parameterisation.crystal.unit_cell.fix_list == expected
