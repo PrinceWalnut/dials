@@ -8,11 +8,16 @@ import warnings
 import libtbx
 from dxtbx.model.experiment_list import Experiment, ExperimentList
 
-from dials.algorithms.indexing import DialsIndexError, DialsIndexRefineError
+from dials.algorithms.indexing import (
+    DialsIndexError,
+    DialsIndexRefineError,
+    laue_optimisation,
+)
 from dials.algorithms.indexing.indexer import Indexer
 from dials.algorithms.indexing.indexer import phil_scope as defaults_phil_scope
 from dials.algorithms.indexing.known_orientation import IndexerKnownOrientation
 from dials.algorithms.indexing.lattice_search import BasisVectorSearch, LatticeSearch
+from dials.algorithms.indexing.laue_optimisation import assign_laue_indices
 from dials.algorithms.indexing.nave_parameters import NaveParameters
 from dials.array_family import flex
 from dials.util.multi_dataset_handling import generate_experiment_identifiers
@@ -496,6 +501,9 @@ class StillsIndexer(Indexer):
         candidates = []
 
         params = copy.deepcopy(self.all_params)
+        laue_params = getattr(params, "laue", None)
+        if laue_params is None:
+            laue_params = laue_optimisation.phil_scope.extract()
 
         for icm, cm in enumerate(candidate_orientation_matrices):
             if icm >= self.params.basis_vector_combinations.max_refine:
@@ -525,6 +533,19 @@ class StillsIndexer(Indexer):
                     indexed["miller_index"] = cb_op.apply(indexed["miller_index"])
 
             if params.indexing.stills.refine_all_candidates:
+                # The Nave mosaicity model, with its delta psi outlier rejection
+                # and Ewald proximal volume, is for monochromatic stills. For Laue
+                # stills (a polychromatic beam), each reciprocal lattice point lies
+                # on the Ewald sphere of its own wavelength, so there is no delta
+                # psi: the candidates are refined with Laue refinement, and
+                # chosen by their refined positional RMSD, without it.
+                is_laue = experiments.all_laue()
+                if is_laue:
+                    # Index the spots by direction, as for wavelength assignment,
+                    # rather than by rounding reciprocal lattice vectors
+                    # calculated at the peak wavelength, which gives Miller
+                    # indices that the candidate cannot predict for many spots
+                    indexed = assign_laue_indices(experiments[0], refl, laue_params)
                 try:
                     logger.info(
                         "$$$ stills_indexer::choose_best_orientation_matrix, candidate %d initial outlier identification",
@@ -553,17 +574,22 @@ class StillsIndexer(Indexer):
                         params, ref_experiments, indexed
                     )
 
-                    # insert a round of Nave-outlier rejection on top of the r.m.s.d. rejection
-                    nv0 = NaveParameters(
-                        params=params,
-                        experiments=ref_experiments,
-                        reflections=indexed,
-                        refinery=R,
-                        graph_verbose=False,
-                    )
-                    nv0()
-                    acceptance_flags_nv0 = nv0.nv_acceptance_flags
-                    indexed = indexed.select(acceptance_flags & acceptance_flags_nv0)
+                    if is_laue:
+                        indexed = indexed.select(acceptance_flags)
+                    else:
+                        # insert a round of Nave-outlier rejection on top of the r.m.s.d. rejection
+                        nv0 = NaveParameters(
+                            params=params,
+                            experiments=ref_experiments,
+                            reflections=indexed,
+                            refinery=R,
+                            graph_verbose=False,
+                        )
+                        nv0()
+                        acceptance_flags_nv0 = nv0.nv_acceptance_flags
+                        indexed = indexed.select(
+                            acceptance_flags & acceptance_flags_nv0
+                        )
 
                     logger.info(
                         "$$$ stills_indexer::choose_best_orientation_matrix, candidate %d after positional and delta-psi outlier rejection",
@@ -577,18 +603,27 @@ class StillsIndexer(Indexer):
                     )
                     ref_experiments = R.get_experiments()
 
-                    nv = NaveParameters(
-                        params=params,
-                        experiments=ref_experiments,
-                        reflections=indexed,
-                        refinery=R,
-                        graph_verbose=False,
-                    )
-                    crystal_model = nv()
-                    assert len(crystal_model) == 1, (
-                        "$$$ stills_indexer::choose_best_orientation_matrix, Only one crystal at this stage"
-                    )
-                    crystal_model = crystal_model[0]
+                    if is_laue:
+                        assert len(ref_experiments) == 1, (
+                            "$$$ stills_indexer::choose_best_orientation_matrix, Only one crystal at this stage"
+                        )
+                        crystal_model = ref_experiments[0].crystal
+                        green_curve_area = ewald_proximal_volume = None
+                    else:
+                        nv = NaveParameters(
+                            params=params,
+                            experiments=ref_experiments,
+                            reflections=indexed,
+                            refinery=R,
+                            graph_verbose=False,
+                        )
+                        crystal_model = nv()
+                        assert len(crystal_model) == 1, (
+                            "$$$ stills_indexer::choose_best_orientation_matrix, Only one crystal at this stage"
+                        )
+                        crystal_model = crystal_model[0]
+                        green_curve_area = nv.green_curve_area
+                        ewald_proximal_volume = nv.ewald_proximal_volume()
 
                     # Drop candidates that after refinement can no longer be converted to the known target space group
                     if (
@@ -606,9 +641,16 @@ class StillsIndexer(Indexer):
                             )
                             continue
 
-                    rmsd, _ = calc_2D_rmsd_and_displacements(
-                        R.predict_for_reflection_table(indexed)
-                    )
+                    predicted = R.predict_for_reflection_table(indexed)
+                    if is_laue:
+                        # Leave out reflections the candidate cannot predict on
+                        # the detector
+                        predicted = predicted.select(
+                            predicted.get_flags(predicted.flags.predicted)
+                        )
+                        if len(predicted) == 0:
+                            continue
+                    rmsd, _ = calc_2D_rmsd_and_displacements(predicted)
                 except Exception as e:
                     logger.info(
                         "Couldn't refine candidate %d, %s: %s",
@@ -624,8 +666,8 @@ class StillsIndexer(Indexer):
                     candidates.append(
                         CandidateInfo(
                             crystal=crystal_model,
-                            green_curve_area=nv.green_curve_area,
-                            ewald_proximal_volume=nv.ewald_proximal_volume(),
+                            green_curve_area=green_curve_area,
+                            ewald_proximal_volume=ewald_proximal_volume,
                             n_indexed=len(indexed),
                             rmsd=rmsd,
                             indexed=indexed,
@@ -697,7 +739,12 @@ class StillsIndexer(Indexer):
                 for i in range(len(candidates)):
                     if i == flex.min_index(results):
                         continue
-                    if best.ewald_proximal_volume > candidates[i].ewald_proximal_volume:
+                    if (
+                        best.ewald_proximal_volume is not None
+                        and candidates[i].ewald_proximal_volume is not None
+                        and best.ewald_proximal_volume
+                        > candidates[i].ewald_proximal_volume
+                    ):
                         logger.info(
                             "Couldn't figure out which candidate is best; picked the one with the best RMSD."
                         )

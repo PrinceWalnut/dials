@@ -271,6 +271,116 @@ def auto_d_min(unit_s0, s1, wavelength_min):
     return wavelength_min / (2.0 * sin_theta)
 
 
+def _scattered_beam_directions(experiment, reflections):
+    """Directions of the scattered beams, from the observed centroids (mm)"""
+    s1 = flex.vec3_double(len(reflections))
+    x, y, _ = reflections["xyzobs.mm.value"].parts()
+    for i_panel, panel in enumerate(experiment.detector):
+        psel = reflections["panel"] == i_panel
+        s1.set_selected(
+            psel,
+            panel.get_lab_coord(flex.vec2_double(x.select(psel), y.select(psel))),
+        )
+    return s1.as_numpy_array()
+
+
+class _Assignment(libtbx.group_args):
+    pass
+
+
+def _assign(experiment, reflections, params, n_macrocycles):
+    """
+    Assign Miller indices and wavelengths to the reflections of one Laue still,
+    starting from the crystal model of the experiment.
+
+    Returns the assigned Miller indices ((0, 0, 0) where not assigned), the
+    wavelengths (the peak wavelength where not assigned), the mask of assigned
+    reflections and the optimised crystal orientation U.
+    """
+    beam = experiment.beam
+    beam_min, beam_max = beam.get_wavelength_range()
+    wavelength_min = params.wavelength_min or beam_min
+    wavelength_max = params.wavelength_max or beam_max
+    wavelength_peak = beam.get_peak_wavelength()
+    unit_s0 = matrix.col(beam.get_unit_s0())
+
+    s1 = _scattered_beam_directions(experiment, reflections)
+    if params.d_min is libtbx.Auto:
+        d_min = auto_d_min(unit_s0, s1, wavelength_min)
+    else:
+        d_min = params.d_min
+
+    assigner = LaueAssigner(
+        unit_s0,
+        s1,
+        experiment.crystal,
+        wavelength_min,
+        wavelength_max,
+        wavelength_peak,
+        d_min,
+        params.outlier_nstd,
+    )
+    assigner.optimise(n_macrocycles)
+
+    wavelength = assigner.wavelengths
+    assigned = wavelength > 0
+    if params.filter_spectrum:
+        assigned &= (wavelength >= wavelength_min) & (wavelength <= wavelength_max)
+    hkl = assigner.miller_indices
+    hkl[~assigned] = 0
+    wavelength[~assigned] = wavelength_peak
+    return _Assignment(
+        hkl=hkl,
+        wavelength=wavelength,
+        assigned=assigned,
+        U=matrix.sqr(tuple(assigner.U.ravel())),
+        unit_s0=unit_s0,
+        s1=s1,
+        d_min=d_min,
+    )
+
+
+def assign_laue_indices(experiment, reflections, params, n_macrocycles=1):
+    """
+    Assign Miller indices to the reflections of a Laue still by direction, for
+    the crystal model of the experiment, as for scoring candidate crystal
+    models. Each macrocycle reorients the crystal and rejects outliers, as in
+    optimise_laue_indexing; the crystal model itself is not changed.
+
+    Args:
+        experiment: The experiment, with the candidate crystal model.
+        reflections: The reflections of its image.
+        params: The laue scope of the dials.index parameters.
+
+    Returns:
+        The assigned reflections, with id 0, the indexed flag, their Miller
+        indices and wavelengths, and the s0, s1 and rlp columns calculated
+        from the wavelengths.
+    """
+    if len(reflections) == 0:
+        return reflections
+    a = _assign(experiment, reflections, params, n_macrocycles)
+    sel = flex.bool(a.assigned.tolist())
+    assigned = reflections.select(sel)
+    hkl = a.hkl[a.assigned]
+    w = a.wavelength[a.assigned]
+    directions = a.s1[a.assigned]
+    directions = directions / np.linalg.norm(directions, axis=1)[:, None]
+    u = np.array(a.unit_s0)
+    s0 = u[None, :] / w[:, None]
+    s1 = directions / w[:, None]
+    assigned["id"] = flex.int(len(assigned), 0)
+    assigned["miller_index"] = flex.miller_index(
+        [tuple(int(j) for j in h) for h in hkl]
+    )
+    assigned["wavelength"] = flex.double(w.tolist())
+    assigned["s0"] = flex.vec3_double([tuple(v) for v in s0.tolist()])
+    assigned["s1"] = flex.vec3_double([tuple(v) for v in s1.tolist()])
+    assigned["rlp"] = flex.vec3_double([tuple(v) for v in (s1 - s0).tolist()])
+    assigned.set_flags(flex.bool(len(assigned), True), assigned.flags.indexed)
+    return assigned
+
+
 def _imageset_ids(experiments, reflections):
     """The imageset_id of the reflections of each experiment"""
     imageset_ids = []
@@ -312,6 +422,9 @@ def optimise_laue_indexing(
     Returns:
         The optimised reflections.
     """
+    if len(experiments) == 0 or len(reflections) == 0:
+        # Nothing was indexed (dials.index then has an empty reflection table)
+        return reflections
     reflections = reflections.copy()
     imageset_ids = _imageset_ids(experiments, reflections)
     n_expts_on_imageset = {}
@@ -334,54 +447,12 @@ def optimise_laue_indexing(
             continue
         n_before = (reflections["id"].select(isel) == i).count(True)
 
-        beam = expt.beam
-        beam_min, beam_max = beam.get_wavelength_range()
-        wavelength_min = params.wavelength_min or beam_min
-        wavelength_max = params.wavelength_max or beam_max
-        wavelength_peak = beam.get_peak_wavelength()
-        unit_s0 = matrix.col(beam.get_unit_s0())
-
-        # Directions of the scattered beams from the observed centroids
-        refls = reflections.select(isel)
-        s1 = flex.vec3_double(len(refls))
-        x, y, _ = refls["xyzobs.mm.value"].parts()
-        for i_panel, panel in enumerate(expt.detector):
-            psel = refls["panel"] == i_panel
-            s1.set_selected(
-                psel,
-                panel.get_lab_coord(flex.vec2_double(x.select(psel), y.select(psel))),
-            )
-
-        s1 = s1.as_numpy_array()
-        if params.d_min is libtbx.Auto:
-            d_min = auto_d_min(unit_s0, s1, wavelength_min)
-        else:
-            d_min = params.d_min
-
-        assigner = LaueAssigner(
-            unit_s0,
-            s1,
-            expt.crystal,
-            wavelength_min,
-            wavelength_max,
-            wavelength_peak,
-            d_min,
-            params.outlier_nstd,
-        )
         U_before = matrix.sqr(expt.crystal.get_U())
-        assigner.optimise(params.n_macrocycles)
-        U_after = matrix.sqr(tuple(assigner.U.ravel()))
-        expt.crystal.set_U(U_after)
-
-        assigned_wavelength = assigner.wavelengths
-        assigned = assigned_wavelength > 0
-        if params.filter_spectrum:
-            assigned &= (assigned_wavelength >= wavelength_min) & (
-                assigned_wavelength <= wavelength_max
-            )
-        hkl = assigner.miller_indices
-        hkl[~assigned] = 0
-        assigned_wavelength[~assigned] = wavelength_peak
+        a = _assign(expt, reflections.select(isel), params, params.n_macrocycles)
+        expt.crystal.set_U(a.U)
+        U_after = a.U
+        assigned, hkl, assigned_wavelength = a.assigned, a.hkl, a.wavelength
+        unit_s0, d_min = a.unit_s0, a.d_min
 
         assigned_flex = flex.bool(assigned.tolist())
         new_id = flex.int(len(isel), -1)

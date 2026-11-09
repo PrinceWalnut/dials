@@ -117,7 +117,9 @@ def test_index_laue_default_overrides():
     assert params.indexing.pink_indexer.voxel_grid_points == 250
     assert params.indexing.refinement_protocol.mode is None
     assert params.indexing.stills.ewald_proximal_volume_max == 0.03
-    assert params.indexing.stills.refine_all_candidates is False
+    assert params.indexing.stills.refine_all_candidates is True
+    assert params.refinement.parameterisation.crystal.fix == "cell"
+    assert params.refinement.reflections.weighting_strategy.wavelength_weight == 0
     assert params.indexing.joint_indexing is False
     assert params.indexing.nproc == 1
     # Pipeline overrides of the laue.index defaults
@@ -175,6 +177,7 @@ def test_refine_laue_default_overrides():
     params = parser.apply_default_overrides(params, laue.refine_defaults)
     refinement = params.refinement
     assert refinement.reflections.weighting_strategy.override == "statistical"
+    assert refinement.reflections.weighting_strategy.wavelength_weight == 100
     # The laue.refine defaults
     outlier = refinement.reflections.outlier
     assert outlier.nproc == 1

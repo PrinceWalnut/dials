@@ -102,10 +102,10 @@ indexing {
   stills {
     ewald_proximal_volume_max = 0.03
     rmsd_min_px = 20
-    # True in the pipeline, but candidate refinement fails for every candidate
-    # with Laue data, as the stills outlier rejection it relies on needs
-    # delpsical.rad, which Laue refinement does not compute
-    refine_all_candidates = False
+    # As in the pipeline. Candidates are refined with Laue refinement, without
+    # the Nave mosaicity model of monochromatic stills (see the refinement
+    # settings below)
+    refine_all_candidates = True
   }
   joint_indexing = False
 }
@@ -115,10 +115,23 @@ refinement {
       action = fix
     }
     scan_varying = False
+    # Not from the pipeline: for refining the candidates of Laue stills, which
+    # is by spot position only (below), fix the unit cell, as an overall scale
+    # of the cell cannot then be determined. The known cell is kept for the
+    # wavelength assignment after indexing (as laue.optimize_indexing does
+    # with geometry.unit_cell in the pipeline).
+    crystal {
+      fix = cell
+    }
   }
   reflections {
     outlier {
       algorithm = None
+    }
+    # Not from the pipeline: refine the candidates by spot position only, as
+    # every spot still has the peak wavelength of the beam when indexing
+    weighting_strategy {
+      wavelength_weight = 0
     }
   }
 }
@@ -133,7 +146,12 @@ index_defaults = [laue_index_defaults, serial_pipeline_index_overrides]
 # (examples/serial_pipeline.sh) uses unchanged, except for the weighting
 # strategy. laue.refine uses stills weighting, as it refines a monochromatic
 # beam for each reflection; statistical weighting is used here, which DIALS
-# refinement uses as Laue statistical weighting for a polychromatic beam.
+# refinement uses as Laue statistical weighting for a polychromatic beam, with
+# a wavelength_weight of 100 rather than the DIALS default of 1e4. At 1e4 the
+# wavelength term, against the fixed wavelengths assigned in indexing,
+# dominates the target: on the DHFR serial data, the median spot position RMSD
+# was about 1.07 px at 1e4 and 0.53 px at 100 (and at any weight down to 0.01),
+# with the wavelength RMSD at 0.0014 and 0.0030 A.
 # Not reproduced are the output filenames, the laue.refine nproc setting (the
 # number of images refined in parallel) and refinery.engine=SparseLevMar.
 #
@@ -147,6 +165,7 @@ refinement {
   reflections {
     weighting_strategy {
       override = statistical
+      wavelength_weight = 100
     }
     outlier {
       nproc = 1

@@ -15,8 +15,9 @@ Examples::
 
 For Laue stills (data with a polychromatic beam imported as stills, for example
 pink-beam Laue data from NeXus files) the defaults change to those of
-laue.refine, but with refinement.reflections.weighting_strategy.override=statistical,
-and with the unit cell parameter for the a-axis fixed. Values set explicitly on
+laue.refine, but with refinement.reflections.weighting_strategy.override=statistical
+(with wavelength_weight=100) and with the unit cell parameter for the a-axis
+fixed. Values set explicitly on
 the command line take precedence.
 """
 

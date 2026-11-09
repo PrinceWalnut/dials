@@ -16,6 +16,7 @@ from scitbx import matrix
 
 from dials.algorithms.indexing.laue_optimisation import (
     LaueAssigner,
+    assign_laue_indices,
     auto_d_min,
     optimise_laue_indexing,
     phil_scope,
@@ -221,3 +222,38 @@ def test_optimise_laue_indexing_auto_d_min():
         n = np.gcd.reduce(h_assigned) / np.gcd.reduce(h)
         assert np.array(h_assigned) == pytest.approx(n * np.array(h))
         assert w_assigned == pytest.approx(w / n)
+
+
+def test_optimise_laue_indexing_nothing_indexed():
+    beam, detector, _ = _models()
+    imported = ExperimentList([Experiment(beam=beam, detector=detector)])
+    reflections = flex.reflection_table()
+    optimised = optimise_laue_indexing(
+        ExperimentList(), reflections, imported, phil_scope.extract()
+    )
+    assert len(optimised) == 0
+
+
+def test_assign_laue_indices():
+    beam, detector, crystal = _models()
+    hkl, wavelengths, xy = _simulated_spots(beam, detector, crystal)
+    reflections = _reflections(xy, [-1] * len(hkl))
+    U = crystal.get_U()
+    experiment = Experiment(beam=beam, detector=detector, crystal=crystal)
+    params = phil_scope.extract()
+    params.d_min = D_MIN
+
+    assigned = assign_laue_indices(experiment, reflections, params)
+
+    assert list(assigned["id"]) == [0] * len(hkl)
+    assert assigned.get_flags(assigned.flags.indexed).all_eq(True)
+    assert list(assigned["miller_index"]) == hkl
+    assert list(assigned["wavelength"]) == pytest.approx(list(wavelengths))
+    w = assigned["wavelength"].as_numpy_array()
+    s0 = np.array(assigned["s0"])
+    s1 = np.array(assigned["s1"])
+    assert np.linalg.norm(s0, axis=1) * w == pytest.approx(np.ones(len(w)))
+    assert np.linalg.norm(s1, axis=1) * w == pytest.approx(np.ones(len(w)))
+    assert np.array(assigned["rlp"]) == pytest.approx(s1 - s0)
+    # The crystal model is not changed
+    assert crystal.get_U() == U
