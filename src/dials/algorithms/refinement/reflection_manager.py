@@ -120,6 +120,21 @@ phil_str = """
                 "Y terms use statistical weights for assignment and spectrum."
         .type = choice
 
+      assignment
+        .help = "The variance model for wavelength_variance=assignment"
+      {{
+        cell_relative_sigma = 0
+          .help = "The relative standard deviation of the d-spacings of the"
+                  "crystal model used to assign the wavelengths in indexing,"
+                  "added to the variance of the assigned wavelengths as"
+                  "(wavelength * cell_relative_sigma)^2"
+          .type = float(value_min = 0)
+        use_B_covariance = True
+          .help = "Also add the variance of the d-spacings propagated from"
+                  "the B matrix covariance of the crystal model, if it has one"
+          .type = bool
+      }}
+
       spectrum
         .help = "The Gaussian spectrum for wavelength_variance=spectrum"
       {{
@@ -492,6 +507,7 @@ class ReflectionManagerFactory:
                     " is not available for time-of-flight data"
                 )
             spectrum = params.weighting_strategy.spectrum
+            assignment = params.weighting_strategy.assignment
             weighting_strategy = (
                 weighting_strategies.LaueWavelengthVarianceWeightingStrategy(
                     experiments,
@@ -499,6 +515,8 @@ class ReflectionManagerFactory:
                     spectrum_source=spectrum.source,
                     spectrum_centre=spectrum.centre,
                     spectrum_sigma=spectrum.sigma,
+                    cell_relative_sigma=assignment.cell_relative_sigma,
+                    use_B_covariance=assignment.use_B_covariance,
                 )
             )
         else:

@@ -232,3 +232,47 @@ def test_laue_stills_refinement(wavelength_variance):
     assert angle < 2e-4
     # The simulated centroid errors are 0.03 mm
     assert rmsd_x < 0.035 and rmsd_y < 0.035
+
+
+def test_assigned_wavelength_variances_with_cell_uncertainty():
+    experiments = _make_experiments()
+    refl = _simulate(experiments, sigma_px=0.0)
+    base = laue_assigned_wavelength_variances(experiments, refl)
+
+    # An isotropic relative error of the d-spacings adds (lambda s)^2
+    s = 0.003
+    with_cell = laue_assigned_wavelength_variances(
+        experiments, refl, cell_relative_sigma=s
+    )
+    expected = base + (refl["wavelength"] * s) ** 2
+    assert list(with_cell) == pytest.approx(list(expected))
+
+    # The B matrix covariance is propagated to the d-spacings
+    crystal = experiments[0].crystal
+    rng = random.Random(1)
+    A = [rng.gauss(0, 1e-5) for _ in range(81)]
+    cov = matrix.sqr(A) * matrix.sqr(A).transpose()
+    crystal.set_B_covariance(cov.as_flex_double_matrix())
+    with_cov = laue_assigned_wavelength_variances(
+        experiments, refl, use_B_covariance=True
+    )
+    B = matrix.sqr(crystal.get_B())
+    eps = 1e-7
+    for i in range(0, len(refl), max(1, len(refl) // 10)):
+        h = matrix.col(refl["miller_index"][i])
+        q_len = (B * h).length()
+        J = []
+        for k in range(9):
+            dB = [0.0] * 9
+            dB[k] = eps
+            Bp = B + matrix.sqr(dB)
+            Bm = B - matrix.sqr(dB)
+            J.append(((Bp * h).length() - (Bm * h).length()) / (2 * eps))
+        J = matrix.row(J)
+        rel_var_d = (J * cov * J.transpose())[0] / q_len**2
+        expected = base[i] + refl["wavelength"][i] ** 2 * rel_var_d
+        assert with_cov[i] == pytest.approx(expected, rel=1e-5)
+    # and ignored unless requested
+    assert list(laue_assigned_wavelength_variances(experiments, refl)) == pytest.approx(
+        list(base)
+    )

@@ -171,7 +171,9 @@ def _robust_centre_and_sigma(values):
     return centre, sigma
 
 
-def laue_assigned_wavelength_variances(experiments, reflections):
+def laue_assigned_wavelength_variances(
+    experiments, reflections, cell_relative_sigma=0.0, use_B_covariance=False
+):
     """
     The variance of the wavelength assigned to each reflection of a Laue
     experiment, propagated from the variances of its observed centroid.
@@ -186,6 +188,15 @@ def laue_assigned_wavelength_variances(experiments, reflections):
     where var(theta) = var(2 theta) / 4 is propagated from var(X) and var(Y)
     through the detector geometry (the covariance of X and Y is not known and
     is taken as zero).
+
+    The wavelength is assigned with the d-spacings of the crystal model at
+    indexing, whose error enters as var(wavelength) += wavelength^2 var(d)/d^2.
+    This is added for an isotropic relative error of the d-spacings,
+    cell_relative_sigma, and, if use_B_covariance and the crystal model has a
+    B matrix covariance, for that covariance, propagated to |B h| = 1/d with
+    d|Bh|/dB_ij = (B h)_i h_j / |B h|. Both treat the cell error of each
+    reflection as independent, although it is common to all the reflections
+    of a crystal.
     """
     n = len(reflections)
     variances = np.zeros(n)
@@ -202,6 +213,22 @@ def laue_assigned_wavelength_variances(experiments, reflections):
     for i_expt, expt in enumerate(experiments):
         unit_s0 = np.array(expt.beam.get_unit_s0())
         in_expt = expt_ids == i_expt
+        rel_var_d = np.zeros(int(in_expt.sum()))
+        if cell_relative_sigma:
+            rel_var_d += cell_relative_sigma**2
+        cov = expt.crystal.get_B_covariance() if use_B_covariance else ()
+        if len(cov) == 81:
+            cov = np.array(cov).reshape(9, 9)
+            B = np.array(expt.crystal.get_B()).reshape(3, 3)
+            hkl = np.array(reflections["miller_index"].select(flex.bool(in_expt)))
+            q = hkl @ B.T
+            q_len_sq = (q * q).sum(axis=1)
+            # Jacobian of |q| with respect to the elements of B (row major)
+            J = (q[:, :, None] * hkl[:, None, :]).reshape(-1, 9) / np.sqrt(q_len_sq)[
+                :, None
+            ]
+            rel_var_d += np.einsum("ni,ij,nj->n", J, cov, J) / q_len_sq
+        variances[in_expt] += wavelength[in_expt] ** 2 * rel_var_d
         for i_panel, panel in enumerate(expt.detector):
             sel = in_expt & (panels == i_panel)
             if not sel.any():
@@ -241,7 +268,7 @@ def laue_assigned_wavelength_variances(experiments, reflections):
             theta = 0.5 * np.arccos(cos_2theta)
             with np.errstate(divide="ignore", invalid="ignore"):
                 dlambda_dtheta = wavelength[sel] / np.tan(theta)
-            variances[sel] = dlambda_dtheta**2 * var_2theta / 4.0
+            variances[sel] += dlambda_dtheta**2 * var_2theta / 4.0
 
     # Spots along the beam have no defined wavelength: give them zero weight
     variances[~np.isfinite(variances)] = np.inf
@@ -287,6 +314,8 @@ class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
         spectrum_centre=None,
         spectrum_sigma=None,
         min_sigma=1e-6,
+        cell_relative_sigma=0.0,
+        use_B_covariance=True,
     ):
         if model not in ("assignment", "spectrum"):
             raise ValueError(f"Unknown wavelength variance model {model}")
@@ -298,6 +327,8 @@ class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
         self._spectrum_centre = spectrum_centre
         self._spectrum_sigma = spectrum_sigma
         self._min_sigma = min_sigma
+        self._cell_relative_sigma = cell_relative_sigma
+        self._use_B_covariance = use_B_covariance
         # The spectrum (centre, sigma) used for each beam, for reporting
         self.spectra = []
 
@@ -336,7 +367,10 @@ class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
 
         if self._model == "assignment":
             variances = laue_assigned_wavelength_variances(
-                self._experiments, reflections
+                self._experiments,
+                reflections,
+                cell_relative_sigma=self._cell_relative_sigma,
+                use_B_covariance=self._use_B_covariance,
             )
             floor = self._min_sigma**2
             variances.set_selected(variances < floor, floor)
