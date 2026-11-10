@@ -276,3 +276,73 @@ def test_assigned_wavelength_variances_with_cell_uncertainty():
     assert list(laue_assigned_wavelength_variances(experiments, refl)) == pytest.approx(
         list(base)
     )
+
+
+def _build_refiner(experiments, refl, phil_str):
+    from dials.algorithms.refinement.refiner import RefinerFactory
+    from dials.algorithms.refinement.refiner import phil_scope as refiner_phil
+
+    params = refiner_phil.fetch(source=libtbx.phil.parse(phil_str)).extract()
+    return RefinerFactory.from_parameters_data_experiments(params, refl, experiments)
+
+
+def test_correlated_cell_error_wavelength_gradients():
+    """With a correlated cell error, the observed wavelengths follow the cell,
+    and the gradients of the wavelength residuals match finite differences"""
+    experiments = _make_experiments()
+    refl = _simulate(experiments, sigma_px=0.3)
+    refiner = _build_refiner(
+        experiments,
+        refl,
+        """
+        refinement {
+          parameterisation {
+            beam.fix = all
+            detector.fix = all
+            spherical_relp_model = True
+          }
+          reflections {
+            outlier.algorithm = null
+            weighting_strategy {
+              override = statistical
+              wavelength_variance = assignment
+              assignment.cell_error = correlated
+            }
+          }
+        }
+        """,
+    )
+    target = refiner._target
+    pred_param = refiner._pred_param
+    target.predict()
+    target.update_matches(force=True)
+    matches = target._matches
+    n = len(matches)
+    assert "wavelength_obs_factor" in matches
+    # At the indexing model, the recalculated wavelengths are the assigned ones
+    assert list(matches["wavelength_obs"]) == pytest.approx(list(matches["wavelength"]))
+
+    _, jacobian, _ = target.compute_residuals_and_gradients()
+    p0 = pred_param.get_param_vals()
+    names = pred_param.get_param_names()
+
+    def wavelength_residuals(p):
+        pred_param.set_param_vals(p)
+        target.predict()
+        target.update_matches(force=True)
+        residuals, _ = target.compute_residuals()
+        return residuals[2 * n :]
+
+    for k, name in enumerate(names):
+        eps = 1e-6
+        pp = list(p0)
+        pp[k] += eps
+        pm = list(p0)
+        pm[k] -= eps
+        fd = (wavelength_residuals(pp) - wavelength_residuals(pm)) / (2 * eps)
+        analytic = jacobian.matrix_copy_column(k)[2 * n :]
+        # Rotation about the beam does not change the wavelengths, so allow
+        # for finite difference noise as well as a relative error
+        tolerance = 1e-8 + 1e-4 * flex.max(flex.abs(fd))
+        assert flex.max(flex.abs(analytic - fd)) < tolerance, name
+    pred_param.set_param_vals(p0)

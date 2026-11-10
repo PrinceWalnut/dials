@@ -821,6 +821,15 @@ class LaueLeastSquaresResidualWithRmsdCutoff(Target):
         reflections["x_resid2"] = reflections["x_resid"] ** 2
         reflections["y_resid"] = y_calc - y_obs
         reflections["y_resid2"] = reflections["y_resid"] ** 2
+        if "wavelength_obs_factor" in reflections:
+            # Correlated cell error: the observed wavelengths follow the cell
+            from dials.algorithms.refinement.weighting_strategies import (
+                laue_wavelength_obs_from_model,
+            )
+
+            reflections["wavelength_obs"] = laue_wavelength_obs_from_model(
+                self._experiments, reflections
+            )
         if "wavelength_obs" in reflections:
             # Set by the weighting strategy, e.g. the centre of the spectrum
             wavelength_obs = reflections["wavelength_obs"]

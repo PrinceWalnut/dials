@@ -987,6 +987,12 @@ class LauePredictionParameterisation(PredictionParameterisation):
         self._e_X_r = (self._setting_rotation * self._axis).cross(self._r)
         self._e_r_s0 = (self._e_X_r).dot(self._s0)
         self._ds0_dbeam_p = None
+        # With a correlated cell error model, the observed wavelength follows
+        # the current cell, wavelength_obs = factor / |r|
+        if "wavelength_obs_factor" in reflections:
+            self._wavelength_obs_factor = reflections["wavelength_obs_factor"]
+        else:
+            self._wavelength_obs_factor = None
         return
 
     def get_gradients(self, reflections, callback=None):
@@ -1127,6 +1133,10 @@ class LauePredictionParameterisation(PredictionParameterisation):
         fixed_rotation = self._fixed_rotation.select(isel)
         setting_rotation = self._setting_rotation.select(isel)
         r = self._r.select(isel)
+        if self._wavelength_obs_factor is not None:
+            obs_factor = self._wavelength_obs_factor.select(isel)
+        else:
+            obs_factor = None
 
         if derivatives is None:
             # get derivatives of the B/U matrix wrt the parameters
@@ -1156,7 +1166,15 @@ class LauePredictionParameterisation(PredictionParameterisation):
             dwavelength = -2 * unit_s0.dot(
                 ((dr * r_dot_r) - ((2 * r) * dr.dot(r))) / (r_dot_r**2)
             )
-            dwavelength_dp.append(dwavelength)
+            if obs_factor is None:
+                dwavelength_dp.append(dwavelength)
+            else:
+                # The wavelength residual is wavelength_cal - factor / |r|, so
+                # subtract d(factor / |r|)/dp = -factor (r.dr) / |r|^3
+                dwavelength_obs = (
+                    -obs_factor * dr.dot(r) / (r_dot_r * flex.sqrt(r_dot_r))
+                )
+                dwavelength_dp.append(dwavelength - dwavelength_obs)
 
             # calculate the derivative of pv for this parameter
             dpv_dp.append(D * (dr - (unit_s0 / wavelength**2) * dwavelength))

@@ -133,6 +133,18 @@ phil_str = """
           .help = "Also add the variance of the d-spacings propagated from"
                   "the B matrix covariance of the crystal model, if it has one"
           .type = bool
+        cell_error = *independent correlated
+          .help = "independent: the cell error is added to the variance of"
+                  "each assigned wavelength (cell_relative_sigma and"
+                  "use_B_covariance). correlated: the error of the cell used"
+                  "in indexing is common to all reflections, so the observed"
+                  "wavelengths are recalculated from the current cell,"
+                  "wavelength_obs = 2 d sin(theta_obs), with only the centroid"
+                  "variance in the weights. A prior on the cell (the indexing"
+                  "cell and its uncertainty) is then given by a unit cell"
+                  "restraint, refinement.parameterisation.crystal.unit_cell"
+                  ".restraints.tie_to_target."
+          .type = choice
       }}
 
       spectrum
@@ -517,6 +529,7 @@ class ReflectionManagerFactory:
                     spectrum_sigma=spectrum.sigma,
                     cell_relative_sigma=assignment.cell_relative_sigma,
                     use_B_covariance=assignment.use_B_covariance,
+                    cell_error=assignment.cell_error,
                 )
             )
         else:
@@ -1258,6 +1271,12 @@ class LaueReflectionManager(ReflectionManager):
     def update_residuals(self):
         x_obs, y_obs, _ = self._reflections["xyzobs.mm.value"].parts()
         x_cal, y_cal, _ = self._reflections["xyzcal.mm"].parts()
+        if "wavelength_obs_factor" in self._reflections:
+            self._reflections["wavelength_obs"] = (
+                weighting_strategies.laue_wavelength_obs_from_model(
+                    self._experiments, self._reflections
+                )
+            )
         wavelength_obs = laue_wavelength_obs(self._reflections)
         wavelength_cal = self._reflections["wavelength_cal"]
         self._reflections["x_resid"] = x_cal - x_obs

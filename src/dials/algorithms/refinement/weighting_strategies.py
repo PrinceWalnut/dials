@@ -275,6 +275,46 @@ def laue_assigned_wavelength_variances(
     return flex.double(variances)
 
 
+def _laue_q_lengths(experiments, reflections):
+    """|A h| = 1/d for each reflection, from the static crystal models"""
+    q_len = flex.double(len(reflections))
+    h = reflections["miller_index"].as_vec3_double()
+    ids = reflections["id"]
+    for i_expt, expt in enumerate(experiments):
+        sel = ids == i_expt
+        n = sel.count(True)
+        if n == 0:
+            continue
+        A = flex.mat3_double(n, expt.crystal.get_A())
+        q_len.set_selected(sel, (A * h.select(sel)).norms())
+    return q_len
+
+
+def _laue_two_sin_theta_obs(experiments, reflections):
+    """2 sin(theta) from the observed scattering directions ("s1")"""
+    s1 = reflections["s1"]
+    unit_s1 = s1 / s1.norms()
+    unit_s0 = flex.vec3_double(len(reflections))
+    ids = reflections["id"]
+    for i_expt, expt in enumerate(experiments):
+        sel = ids == i_expt
+        unit_s0.set_selected(sel, expt.beam.get_unit_s0())
+    return (unit_s1 - unit_s0).norms()
+
+
+def laue_wavelength_obs_from_model(experiments, reflections):
+    """
+    The observed wavelengths for the current crystal models, for a correlated
+    cell error: wavelength_obs = factor / |A h| = factor d, with the factor
+    2 sin(theta_obs) ("wavelength_obs_factor") from the observed scattering
+    directions. This is the wavelength the LaueAssigner would assign with the
+    current cell. Uses the static crystal models.
+    """
+    return reflections["wavelength_obs_factor"] / _laue_q_lengths(
+        experiments, reflections
+    )
+
+
 class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
     """
     Statistical weights for X and Y, and a weight for the wavelength term of
@@ -316,6 +356,7 @@ class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
         min_sigma=1e-6,
         cell_relative_sigma=0.0,
         use_B_covariance=True,
+        cell_error="independent",
     ):
         if model not in ("assignment", "spectrum"):
             raise ValueError(f"Unknown wavelength variance model {model}")
@@ -329,6 +370,9 @@ class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
         self._min_sigma = min_sigma
         self._cell_relative_sigma = cell_relative_sigma
         self._use_B_covariance = use_B_covariance
+        if cell_error not in ("independent", "correlated"):
+            raise ValueError(f"Unknown cell error model {cell_error}")
+        self._cell_error = cell_error
         # The spectrum (centre, sigma) used for each beam, for reporting
         self.spectra = []
 
@@ -366,16 +410,30 @@ class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
         wx, wy, _ = reflections["xyzobs.mm.weights"].parts()
 
         if self._model == "assignment":
+            correlated = self._cell_error == "correlated"
+            # For a correlated cell error, the cell error is not part of the
+            # variance of each reflection: the observed wavelengths follow the
+            # current cell instead
             variances = laue_assigned_wavelength_variances(
                 self._experiments,
                 reflections,
-                cell_relative_sigma=self._cell_relative_sigma,
-                use_B_covariance=self._use_B_covariance,
+                cell_relative_sigma=0.0 if correlated else self._cell_relative_sigma,
+                use_B_covariance=False if correlated else self._use_B_covariance,
             )
             floor = self._min_sigma**2
             variances.set_selected(variances < floor, floor)
             wz = 1.0 / variances
-            reflections["wavelength_obs"] = reflections["wavelength"].deep_copy()
+            if correlated:
+                # The factor 2 sin(theta_obs) = |s1/|s1| - s0/|s0||, from the
+                # observed scattering directions
+                reflections["wavelength_obs_factor"] = _laue_two_sin_theta_obs(
+                    self._experiments, reflections
+                )
+                reflections["wavelength_obs"] = laue_wavelength_obs_from_model(
+                    self._experiments, reflections
+                )
+            else:
+                reflections["wavelength_obs"] = reflections["wavelength"].deep_copy()
         else:
             expt_spectra = self._spectra_by_beam(reflections)
             centre = flex.double(len(reflections))
