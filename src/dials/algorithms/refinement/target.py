@@ -821,7 +821,11 @@ class LaueLeastSquaresResidualWithRmsdCutoff(Target):
         reflections["x_resid2"] = reflections["x_resid"] ** 2
         reflections["y_resid"] = y_calc - y_obs
         reflections["y_resid2"] = reflections["y_resid"] ** 2
-        wavelength_obs = reflections["wavelength"]
+        if "wavelength_obs" in reflections:
+            # Set by the weighting strategy, e.g. the centre of the spectrum
+            wavelength_obs = reflections["wavelength_obs"]
+        else:
+            wavelength_obs = reflections["wavelength"]
         wavelength_cal = reflections["wavelength_cal"]
         reflections["wavelength_resid"] = wavelength_cal - wavelength_obs
         reflections["wavelength_resid2"] = reflections["wavelength_resid"] ** 2

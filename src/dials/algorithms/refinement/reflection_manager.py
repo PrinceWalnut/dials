@@ -105,8 +105,38 @@ phil_str = """
         .type = floats(size = 3, value_min = 0)
       wavelength_weight = 1e4
         .help = "Weight for the wavelength term in the target function for"
-                "Laue refinement"
+                "Laue refinement, with wavelength_variance=weight"
         .type = float(value_min = 0)
+
+      wavelength_variance = *weight assignment spectrum
+        .help = "How the weight of the wavelength term of the Laue target"
+                "is set. weight: from wavelength_weight, as given by the"
+                "weighting strategy override. assignment: 1/var(wavelength),"
+                "with the variance of the wavelength assigned in indexing"
+                "propagated from the centroid variances (wavelength_obs is the"
+                "assigned wavelength). spectrum: maximum likelihood for a"
+                "Gaussian beam spectrum, with wavelength_obs the centre of the"
+                "spectrum and the weight 1/sigma^2 of the spectrum. The X and"
+                "Y terms use statistical weights for assignment and spectrum."
+        .type = choice
+
+      spectrum
+        .help = "The Gaussian spectrum for wavelength_variance=spectrum"
+      {{
+        source = *beam reflections
+          .help = "beam: the centre is the peak wavelength of the beam (or"
+                  "the midpoint of its wavelength range) and the wavelength"
+                  "range is taken as the FWHM. reflections: the median and"
+                  "normalised median absolute deviation of the wavelengths"
+                  "assigned to the reflections of each beam in indexing."
+          .type = choice
+        centre = None
+          .help = "Override the centre of the spectrum (Angstrom)"
+          .type = float(value_min = 0)
+        sigma = None
+          .help = "Override the standard deviation of the spectrum (Angstrom)"
+          .type = float(value_min = 0)
+      }}
     }}
 
     {outlier_phil}
@@ -451,9 +481,30 @@ class ReflectionManagerFactory:
                     f"{params.weighting_strategy.override} not compatible with Laue data"
                 )
 
-        weighting_strategy = ReflectionManagerFactory.get_weighting_strategy_override(
-            params
-        )
+        if params.weighting_strategy.wavelength_variance in (
+            "assignment",
+            "spectrum",
+        ):
+            if all_tof_experiments:
+                raise ValueError(
+                    "wavelength_variance="
+                    f"{params.weighting_strategy.wavelength_variance}"
+                    " is not available for time-of-flight data"
+                )
+            spectrum = params.weighting_strategy.spectrum
+            weighting_strategy = (
+                weighting_strategies.LaueWavelengthVarianceWeightingStrategy(
+                    experiments,
+                    model=params.weighting_strategy.wavelength_variance,
+                    spectrum_source=spectrum.source,
+                    spectrum_centre=spectrum.centre,
+                    spectrum_sigma=spectrum.sigma,
+                )
+            )
+        else:
+            weighting_strategy = (
+                ReflectionManagerFactory.get_weighting_strategy_override(params)
+            )
 
         return refman(
             reflections=reflections,
@@ -1004,6 +1055,18 @@ class StillsReflectionManager(ReflectionManager):
         logger.info(dials.util.tabulate(rows, header) + "\n")
 
 
+def laue_wavelength_obs(reflections):
+    """
+    The observed wavelengths for the wavelength term of the Laue target: the
+    "wavelength_obs" column, set by a weighting strategy that models the
+    observed wavelength (such as the centre of a Gaussian spectrum), if present,
+    otherwise the wavelengths assigned in indexing ("wavelength").
+    """
+    if "wavelength_obs" in reflections:
+        return reflections["wavelength_obs"]
+    return reflections["wavelength"]
+
+
 class LaueReflectionManager(ReflectionManager):
     _weighting_strategy = weighting_strategies.LaueStatisticalWeightingStrategy()
     experiment_type = "laue"
@@ -1098,6 +1161,16 @@ class LaueReflectionManager(ReflectionManager):
                 weighting_strategies.LaueStatisticalWeightingStrategy(wavelength_weight)
             )
         self._weighting_strategy.calculate_weights(self._reflections)
+        spectra = getattr(self._weighting_strategy, "spectra", None)
+        for i, (centre, sigma) in enumerate(spectra or []):
+            logger.info(
+                "Gaussian spectrum for the wavelength term of beam %d: "
+                "centre %.5f A, sigma %.5f A (weight %.4g)",
+                i,
+                centre,
+                sigma,
+                1.0 / sigma**2,
+            )
 
         # not known until the manager is finalised
         self._sample_size = None
@@ -1167,7 +1240,7 @@ class LaueReflectionManager(ReflectionManager):
     def update_residuals(self):
         x_obs, y_obs, _ = self._reflections["xyzobs.mm.value"].parts()
         x_cal, y_cal, _ = self._reflections["xyzcal.mm"].parts()
-        wavelength_obs = self._reflections["wavelength"]
+        wavelength_obs = laue_wavelength_obs(self._reflections)
         wavelength_cal = self._reflections["wavelength_cal"]
         self._reflections["x_resid"] = x_cal - x_obs
         self._reflections["y_resid"] = y_cal - y_obs
