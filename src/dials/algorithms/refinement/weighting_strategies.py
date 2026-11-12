@@ -291,28 +291,41 @@ def _laue_q_lengths(experiments, reflections):
 
 
 def _laue_two_sin_theta_obs(experiments, reflections):
-    """2 sin(theta) from the observed scattering directions ("s1")"""
-    s1 = reflections["s1"]
-    unit_s1 = s1 / s1.norms()
-    unit_s0 = flex.vec3_double(len(reflections))
+    """
+    2 sin(theta) from the observed centroids, through the current detector
+    and beam models: |v/|v| - s0/|s0||, with v the lab coordinates of the
+    centroid.
+    """
+    two_sin_theta = flex.double(len(reflections))
+    x, y, _ = reflections["xyzobs.mm.value"].parts()
     ids = reflections["id"]
+    panels = reflections["panel"]
     for i_expt, expt in enumerate(experiments):
-        sel = ids == i_expt
-        unit_s0.set_selected(sel, expt.beam.get_unit_s0())
-    return (unit_s1 - unit_s0).norms()
+        in_expt = ids == i_expt
+        unit_s0 = expt.beam.get_unit_s0()
+        for i_panel, panel in enumerate(expt.detector):
+            sel = in_expt & (panels == i_panel)
+            n = sel.count(True)
+            if n == 0:
+                continue
+            v = panel.get_lab_coord(flex.vec2_double(x.select(sel), y.select(sel)))
+            u1 = v / v.norms()
+            two_sin_theta.set_selected(sel, (u1 - flex.vec3_double(n, unit_s0)).norms())
+    return two_sin_theta
 
 
 def laue_wavelength_obs_from_model(experiments, reflections):
     """
-    The observed wavelengths for the current crystal models, for a correlated
-    cell error: wavelength_obs = factor / |A h| = factor d, with the factor
-    2 sin(theta_obs) ("wavelength_obs_factor") from the observed scattering
-    directions. This is the wavelength the LaueAssigner would assign with the
-    current cell. Uses the static crystal models.
+    The observed wavelengths for the current models, for a correlated cell
+    error: wavelength_obs = 2 sin(theta_obs) d, as the LaueAssigner would
+    assign them with the current cell and geometry. 2 sin(theta_obs) is
+    recalculated from the observed centroids through the current detector
+    and beam (and stored as "wavelength_obs_factor"), and d from the current
+    static crystal models.
     """
-    return reflections["wavelength_obs_factor"] / _laue_q_lengths(
-        experiments, reflections
-    )
+    factor = _laue_two_sin_theta_obs(experiments, reflections)
+    reflections["wavelength_obs_factor"] = factor
+    return factor / _laue_q_lengths(experiments, reflections)
 
 
 class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
@@ -424,11 +437,7 @@ class LaueWavelengthVarianceWeightingStrategy(StatisticalWeightingStrategy):
             variances.set_selected(variances < floor, floor)
             wz = 1.0 / variances
             if correlated:
-                # The factor 2 sin(theta_obs) = |s1/|s1| - s0/|s0||, from the
-                # observed scattering directions
-                reflections["wavelength_obs_factor"] = _laue_two_sin_theta_obs(
-                    self._experiments, reflections
-                )
+                # Also sets the factor 2 sin(theta_obs) ("wavelength_obs_factor")
                 reflections["wavelength_obs"] = laue_wavelength_obs_from_model(
                     self._experiments, reflections
                 )

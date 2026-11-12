@@ -1118,6 +1118,60 @@ class LauePredictionParameterisation(PredictionParameterisation):
 
         return dpv_dp, dphi_dp
 
+    def _grads_detector_loop(self, reflections, results, callback=None):
+        """As for the base class and, with a correlated cell error model, add
+        the derivatives of the observed wavelengths, wavelength_obs =
+        2 sin(theta_obs) d, with respect to the detector parameters, through
+        the observed scattering angles"""
+        iparam0 = self._iparam
+        results = super()._grads_detector_loop(reflections, results, callback=None)
+
+        if self._wavelength_obs_factor is not None:
+            x, y, _ = reflections["xyzobs.mm.value"].parts()
+            iparam = iparam0
+            for dp in self._detector_parameterisations:
+                isel = flex.size_t()
+                for exp_id in dp.get_experiment_ids():
+                    isel.extend(self._experiment_to_idx[exp_id])
+                panel = reflections["panel"].select(isel)
+                for panel_id, p in enumerate(dp.get_model()):
+                    sub_isel = isel.select(panel == panel_id)
+                    n = len(sub_isel)
+                    if n == 0:
+                        continue
+                    xy1 = flex.vec3_double(
+                        x.select(sub_isel), y.select(sub_isel), flex.double(n, 1.0)
+                    )
+                    # Observed lab coordinates v = d (x, y, 1)
+                    v = flex.mat3_double(n, p.get_d_matrix()) * xy1
+                    v_len = v.norms()
+                    u1 = v / v_len
+                    s0 = self._s0.select(sub_isel)
+                    diff = u1 - s0 / s0.norms()
+                    diff_len = diff.norms()
+                    r = self._r.select(sub_isel)
+                    d = 1.0 / r.norms()
+                    dd_ddet_p = dp.get_ds_dp(
+                        multi_state_elt=panel_id, use_none_as_null=True
+                    )
+                    key = self._grad_names[2]
+                    for k, der in enumerate(dd_ddet_p):
+                        if der is None:
+                            continue
+                        dv = flex.mat3_double(n, der.elems) * xy1
+                        du1 = (dv - u1 * u1.dot(dv)) / v_len
+                        dwavelength_obs = d * diff.dot(du1) / diff_len
+                        grad = results[iparam + k][key]
+                        grad.set_selected(
+                            sub_isel, grad.select(sub_isel) - dwavelength_obs
+                        )
+                iparam += dp.num_free()
+
+        if callback is not None:
+            for i in range(iparam0, self._iparam):
+                results[i] = callback(results[i])
+        return results
+
     def _xl_derivatives(self, isel, derivatives, b_matrix, parameterisation=None):
         """helper function to extend the derivatives lists by derivatives of
         generic parameterisations."""

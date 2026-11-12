@@ -287,8 +287,9 @@ def _build_refiner(experiments, refl, phil_str):
 
 
 def test_correlated_cell_error_wavelength_gradients():
-    """With a correlated cell error, the observed wavelengths follow the cell,
-    and the gradients of the wavelength residuals match finite differences"""
+    """With a correlated cell error, the observed wavelengths follow the cell
+    and the detector, and the gradients of the wavelength residuals with
+    respect to the crystal and detector parameters match finite differences"""
     experiments = _make_experiments()
     refl = _simulate(experiments, sigma_px=0.3)
     refiner = _build_refiner(
@@ -298,7 +299,6 @@ def test_correlated_cell_error_wavelength_gradients():
         refinement {
           parameterisation {
             beam.fix = all
-            detector.fix = all
             spherical_relp_model = True
           }
           reflections {
